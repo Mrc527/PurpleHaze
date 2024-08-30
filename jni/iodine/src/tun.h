@@ -15,9 +15,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#ifndef _TUN_H_
-#define _TUN_H_
-
+#pragma once
 int open_tun(const char *);
 void close_tun(int);
 int write_tun(int, char *, size_t);
@@ -26,7 +24,7 @@ int tun_setip(const char *, const char *, int);
 int tun_setmtu(const unsigned);
 
 #ifdef __ANDROID__
-struct _tun_config_android {
+extern struct _tun_config_android {
 	char *ip;
 	char *remoteip;
 	int netbits;
@@ -34,5 +32,3 @@ struct _tun_config_android {
 	int request_disconnect;
 } tun_config_android;
 #endif /* __ANDROID__ */
-
-#endif /* _TUN_H_ */

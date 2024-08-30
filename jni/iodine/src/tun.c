@@ -60,6 +60,11 @@ static void get_name(char *ifname, int namelen, char *dev_name);
 #include "tun.h"
 #include "common.h"
 
+#ifdef __ANDROID__
+struct _tun_config_android tun_config_android;
+#endif /* __ANDROID__ */
+
+
 static char if_name[250];
 
 #ifdef LINUX
