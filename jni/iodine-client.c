@@ -169,6 +169,12 @@ JNIEXPORT jint JNICALL Java_org_xapek_andiodine_IodineClient_connect(
 		printf("Sending raw traffic directly to %s\n", client_get_raw_addr());
 	}
 
+    // get request type used
+    char actualRequestType[12];
+    memset(actualRequestType, 0, 12);
+    strncpy(actualRequestType, client_get_qtype(), 11);
+    printf("Selected request type: %s\n", actualRequestType);
+
 	printf("Handshake successful, leave native code");
 	return 0;
 }
