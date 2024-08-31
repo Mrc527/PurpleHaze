@@ -16,9 +16,8 @@
 
 #ifndef __FIX_ANDROID_H__
 #define __FIX_ANDROID_H__
-
-/* Newer android platforms can have this data already */
-#ifndef C_IN
+#include <arpa/nameser.h>
+#ifndef _ARPA_NAMESER_COMPAT_
 
 typedef struct {
 	unsigned id :16;
