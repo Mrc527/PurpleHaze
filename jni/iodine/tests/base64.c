@@ -2,7 +2,7 @@
  * Copyright (c) 2006-2014 Erik Ekman <yarrick@kryo.se>,
  * 2006-2009 Bjorn Andersson <flex@kryo.se>
  *
- * Permission to use, copy, modify, and distribute this software for any
+ * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
  * copyright notice and this permission notice appear in all copies.
  *
@@ -22,7 +22,6 @@
 #include <errno.h>
 
 #include "encoding.h"
-#include "base64.h"
 #include "test.h"
 
 #define TUPLES 5
@@ -69,17 +68,13 @@ START_TEST(test_base64_encode)
 {
 	size_t len;
 	char buf[4096];
-	struct encoder *b64;
 	int val;
 
-	b64 = get_base64_encoder();
-
 	len = sizeof(buf);
-	val = b64->encode(buf, &len, testpairs[_i].a, strlen(testpairs[_i].a));
+	val = base64_ops.encode(buf, &len, testpairs[_i].a, strlen(testpairs[_i].a));
 
-	fail_unless(val == strlen(testpairs[_i].b));
-	fail_unless(strcmp(buf, testpairs[_i].b) == 0,
-			"'%s' != '%s'", buf, testpairs[_i].b);
+	ck_assert(val == strlen(testpairs[_i].b));
+	ck_assert_str_eq(buf, testpairs[_i].b);
 }
 END_TEST
 
@@ -87,17 +82,13 @@ START_TEST(test_base64_decode)
 {
 	size_t len;
 	char buf[4096];
-	struct encoder *b64;
 	int val;
 
-	b64 = get_base64_encoder();
-
 	len = sizeof(buf);
-	val = b64->decode(buf, &len, testpairs[_i].b, strlen(testpairs[_i].b));
+	val = base64_ops.decode(buf, &len, testpairs[_i].b, strlen(testpairs[_i].b));
 
-	fail_unless(val == strlen(testpairs[_i].a));
-	fail_unless(strcmp(buf, testpairs[_i].a) == 0,
-			"'%s' != '%s'", buf, testpairs[_i].a);
+	ck_assert(val == strlen(testpairs[_i].a));
+	ck_assert_str_eq(buf, testpairs[_i].a);
 }
 END_TEST
 
@@ -107,14 +98,11 @@ START_TEST(test_base64_blksize)
 	size_t enclen;
 	char *rawbuf;
 	char *encbuf;
-	struct encoder *b64;
 	int i;
 	int val;
 
-	b64 = get_base64_encoder();
-
-	rawlen = b64->blocksize_raw();
-	enclen = b64->blocksize_encoded();
+	rawlen = base64_ops.blocksize_raw;
+	enclen = base64_ops.blocksize_encoded;
 
 	rawbuf = malloc(rawlen + 16);
 	encbuf = malloc(enclen + 16);
@@ -124,27 +112,27 @@ START_TEST(test_base64_blksize)
 	}
 	rawbuf[i] = 0;
 
-	val = b64->encode(encbuf, &enclen, rawbuf, rawlen);
+	val = base64_ops.encode(encbuf, &enclen, rawbuf, rawlen);
 
-	fail_unless(rawlen == 3, "raw length was %d not 3", rawlen);
-	fail_unless(enclen == 3, "encoded %d bytes, not 3", enclen);
-	fail_unless(val == 4, "encoded string %s was length %d", encbuf, val);
+	ck_assert_msg(rawlen == 3, "raw length was %zu not 3", rawlen);
+	ck_assert_msg(enclen == 3, "encoded %zu bytes, not 3", enclen);
+	ck_assert_msg(val == 4, "encoded string %s was length %d", encbuf, val);
 
 	memset(rawbuf, 0, rawlen + 16);
 
 	enclen = val;
-	val = b64->decode(rawbuf, &rawlen, encbuf, enclen);
+	val = base64_ops.decode(rawbuf, &rawlen, encbuf, enclen);
 
-	fail_unless(rawlen == 3, "raw length was %d not 3", rawlen);
-	fail_unless(val == 3);
+	ck_assert_msg(rawlen == 3, "raw length was %zu not 3", rawlen);
+	ck_assert(val == 3);
 	for (i = 0; i < rawlen; i++) {
-		fail_unless(rawbuf[i] == 'A');
+		ck_assert(rawbuf[i] == 'A');
 	}
 }
 END_TEST
 
 TCase *
-test_base64_create_tests()
+test_base64_create_tests(void)
 {
 	TCase *tc;
 

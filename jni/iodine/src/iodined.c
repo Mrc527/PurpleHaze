@@ -1,8 +1,8 @@
 /*
- * Copyright (c) 2006-2014 Erik Ekman <yarrick@kryo.se>,
+ * Copyright (c) 2006-2015 Erik Ekman <yarrick@kryo.se>,
  * 2006-2009 Bjorn Andersson <flex@kryo.se>
  *
- * Permission to use, copy, modify, and distribute this software for any
+ * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
  * copyright notice and this permission notice appear in all copies.
  *
@@ -51,10 +51,6 @@
 
 #include "dns.h"
 #include "encoding.h"
-#include "base32.h"
-#include "base64.h"
-#include "base64u.h"
-#include "base128.h"
 #include "user.h"
 #include "login.h"
 #include "tun.h"
@@ -72,13 +68,21 @@ WSADATA wsa_data;
 
 #define PASSWORD_ENV_VAR "IODINED_PASS"
 
+#if defined IP_RECVDSTADDR
+# define DSTADDR_SOCKOPT IP_RECVDSTADDR
+# define dstaddr(x) ((struct in_addr *) CMSG_DATA(x))
+#elif defined IP_PKTINFO
+# define DSTADDR_SOCKOPT IP_PKTINFO
+# define dstaddr(x) (&(((struct in_pktinfo *)(CMSG_DATA(x)))->ipi_addr))
+#endif
+
+#ifndef IPV6_RECVPKTINFO
+#define IPV6_RECVPKTINFO IPV6_PKTINFO
+#endif
+
 static int running = 1;
 static char *topdomain;
 static char password[33];
-static struct encoder *b32;
-static struct encoder *b64;
-static struct encoder *b64u;
-static struct encoder *b128;
 static int created_users;
 
 static int check_ip;
@@ -93,62 +97,83 @@ static int debug;
 
 #if !defined(BSD) && !defined(__GLIBC__)
 static char *__progname;
+#else
+extern char *__progname;
 #endif
 
-static int read_dns(int, int, struct query *);
-static void write_dns(int, struct query *, char *, int, char);
-static void handle_full_packet(int, int, int);
+/* Struct with IPv4 and IPv6 file descriptors.
+ * Need to be passed on down to tunneling code since we can get a
+ * packet on one fd meant for a user on the other.
+ */
+struct dnsfd {
+	int v4fd;
+	int v6fd;
+};
 
-/* Ask externalip.net webservice to get external ip */
-static int get_external_ip(struct in_addr *ip)
+static int read_dns(int fd, struct dnsfd *dns_fds, int tun_fd, struct query *q);
+static void write_dns(int fd, struct query *q, const char *data, int datalen, char downenc);
+static void handle_full_packet(int tun_fd, struct dnsfd *dns_fds, int userid);
+
+static int
+get_dns_fd(struct dnsfd *fds, struct sockaddr_storage *addr)
 {
-	int sock;
-	struct addrinfo *addr;
+	if (addr->ss_family == AF_INET6) {
+		return fds->v6fd;
+	}
+	return fds->v4fd;
+}
+
+/* Ask opendns.com DNS service for external ip */
+static int
+get_external_ip(struct in_addr *ip)
+{
+	static const char target[] = "myip.opendns.com";
+	struct query query;
+	int attempt;
 	int res;
-	const char *getstr = "GET /ip/ HTTP/1.0\r\n"
-		/* HTTP 1.0 to avoid chunked transfer coding */
-		"Host: api.externalip.net\r\n\r\n";
-	char buf[512];
-	char *b;
-	int len;
+	int fd;
+	int out_len = 0;
+	memset(&query, 0, sizeof(query));
 
-	res = getaddrinfo("api.externalip.net", "80", NULL, &addr);
+	query.type = T_A;
+	res = get_addr("resolver1.opendns.com", 53, AF_INET, 0, &query.destination);
 	if (res < 0) return 1;
+	query.dest_len = res;
 
-	sock = socket(addr->ai_family, addr->ai_socktype, addr->ai_protocol);
-	if (sock < 0) {
-		freeaddrinfo(addr);
-		return 2;
+	fd = open_dns_from_host(NULL, 0, AF_INET, AI_PASSIVE);
+	if (fd < 0) return 2;
+
+	for (attempt = 0; attempt < 3; attempt++) {
+		char buf[64*1024];
+		int buflen;
+		fd_set fds;
+		struct timeval tv;
+
+		if (attempt) fprintf(stderr, "Retrying external IP lookup\n");
+		query.id = rand();
+		buflen = sizeof(buf);
+		buflen = dns_encode(buf, buflen, &query, QR_QUERY, target, strlen(target));
+		if (buflen < 0) continue;
+
+		sendto(fd, buf, buflen, 0, (struct sockaddr*)&query.destination, query.dest_len);
+
+		tv.tv_sec = 1 + attempt;
+		tv.tv_usec = 0;
+		FD_ZERO(&fds);
+		FD_SET(fd, &fds);
+		res = select(fd + 1, &fds, NULL, NULL, &tv);
+		if (res > 0) {
+			buflen = sizeof(buf);
+			buflen = recv(fd, buf, buflen, 0);
+			if (buflen > 0) {
+				out_len = dns_decode((char *)ip, sizeof(struct in_addr), &query, QR_ANSWER, buf, buflen);
+				if (out_len > 0) break;
+			}
+		}
 	}
 
-	res = connect(sock, addr->ai_addr, addr->ai_addrlen);
-	freeaddrinfo(addr);
-	if (res < 0) return 3;
-
-	res = write(sock, getstr, strlen(getstr));
-	if (res != strlen(getstr)) return 4;
-
-	/* Zero buf before receiving, leave at least one zero at the end */
-	memset(buf, 0, sizeof(buf));
-	res = read(sock, buf, sizeof(buf) - 1);
-	if (res < 0) return 5;
-	len = res;
-
-	res = close(sock);
-	if (res < 0) return 6;
-
-	b = buf;
-	while (len > 9) {
-		/* Look for split between headers and data */
-		if (strncmp("\r\n\r\n", b, 4) == 0) break;
-		b++;
-		len--;
-	}
-	if (len < 10) return 7;
-	b += 4;
-
-	res = inet_aton(b, ip);
-	return (res == 0);
+	close_dns(fd);
+	return (out_len != sizeof(struct in_addr));
 }
 
 static void
@@ -157,32 +182,12 @@ sigint(int sig)
 	running = 0;
 }
 
-#ifdef WINDOWS32
-#define	LOG_EMERG	0
-#define	LOG_ALERT	1
-#define	LOG_CRIT	2
-#define	LOG_ERR		3
-#define	LOG_WARNING	4
-#define	LOG_NOTICE	5
-#define	LOG_INFO	6
-#define	LOG_DEBUG	7
-static void
-syslog(int a, const char *str, ...)
-{
-	/* TODO: implement (add to event log), move to common.c */
-	;
-}
-#endif
-
 /* This will not check that user has passed login challenge */
-static int
-check_user_and_ip(int userid, struct query *q)
+static int check_user_and_ip(int userid, struct query *q)
 {
-	struct sockaddr_in *tempin;
-
 	/* Note: duplicate in handle_raw_login() except IP-address check */
 
-	if (userid < 0 || userid >= created_users ) {
+	if (userid < 0 || userid >= created_users) {
 		return 1;
 	}
 	if (!users[userid].active || users[userid].disabled) {
@@ -197,13 +202,31 @@ check_user_and_ip(int userid, struct query *q)
 		return 0;
 	}
 
-	tempin = (struct sockaddr_in *) &(q->from);
-	return memcmp(&(users[userid].host), &(tempin->sin_addr), sizeof(struct in_addr));
+	if (q->from.ss_family != users[userid].host.ss_family) {
+		return 1;
+	}
+	/* Check IPv4 */
+	if (q->from.ss_family == AF_INET) {
+		struct sockaddr_in *expected, *received;
+
+		expected = (struct sockaddr_in *) &(users[userid].host);
+		received = (struct sockaddr_in *) &(q->from);
+		return memcmp(&(expected->sin_addr), &(received->sin_addr), sizeof(struct in_addr));
+	}
+	/* Check IPv6 */
+	if (q->from.ss_family == AF_INET6) {
+		struct sockaddr_in6 *expected, *received;
+
+		expected = (struct sockaddr_in6 *) &(users[userid].host);
+		received = (struct sockaddr_in6 *) &(q->from);
+		return memcmp(&(expected->sin6_addr), &(received->sin6_addr), sizeof(struct in6_addr));
+	}
+	/* Unknown address family */
+	return 1;
 }
 
 /* This checks that user has passed normal (non-raw) login challenge */
-static int
-check_authenticated_user_and_ip(int userid, struct query *q)
+static int check_authenticated_user_and_ip(int userid, struct query *q)
 {
 	int res = check_user_and_ip(userid, q);
 	if (res)
@@ -215,8 +238,19 @@ check_authenticated_user_and_ip(int userid, struct query *q)
 	return 0;
 }
 
-static void
-send_raw(int fd, char *buf, int buflen, int user, int cmd, struct query *q)
+static int check_authenticated_user_and_ip_and_options(int userid, struct query *q)
+{
+	int res = check_authenticated_user_and_ip(userid, q);
+	if (res || check_ip)
+		return res;
+
+	if (users[userid].options_locked)
+		return 1;
+
+	return 0;
+}
+
+static void send_raw(int fd, char *buf, int buflen, int user, int cmd, struct query *q)
 {
 	char packet[4096];
 	int len;
@@ -240,8 +274,7 @@ send_raw(int fd, char *buf, int buflen, int user, int cmd, struct query *q)
 }
 
 
-static void
-start_new_outpacket(int userid, char *data, int datalen)
+static void start_new_outpacket(int userid, char *data, int datalen)
 /* Copies data to .outpacket and resets all counters.
    data is expected to be compressed already. */
 {
@@ -257,8 +290,7 @@ start_new_outpacket(int userid, char *data, int datalen)
 
 #ifdef OUTPACKETQ_LEN
 
-static int
-save_to_outpacketq(int userid, char *data, int datalen)
+static int save_to_outpacketq(int userid, char *data, int datalen)
 /* Find space in outpacket-queue and store data (expected compressed already).
    Returns: 1 = okay, 0 = no space. */
 {
@@ -286,8 +318,7 @@ save_to_outpacketq(int userid, char *data, int datalen)
 	return 1;
 }
 
-static int
-get_from_outpacketq(int userid)
+static int get_from_outpacketq(int userid)
 /* Starts new outpacket from queue, if any.
    Returns: 1 = okay, 0 = no packets were waiting. */
 {
@@ -334,8 +365,7 @@ get_from_outpacketq(int userid)
    number, and of course data.)
 */
 
-static void
-save_to_dnscache(int userid, struct query *q, char *answer, int answerlen)
+static void save_to_dnscache(int userid, struct query *q, char *answer, int answerlen)
 /* Store answer in our little DNS cache. */
 {
 	int fill;
@@ -354,8 +384,7 @@ save_to_dnscache(int userid, struct query *q, char *answer, int answerlen)
 	users[userid].dnscache_lastfilled = fill;
 }
 
-static int
-answer_from_dnscache(int dns_fd, int userid, struct query *q)
+static int answer_from_dnscache(int dns_fd, int userid, struct query *q)
 /* Checks cache and sends repeated answer if we alreay saw this query recently.
    Returns: 1 = answer sent, drop this query, 0 = no answer sent, this is
    a new query. */
@@ -396,10 +425,11 @@ answer_from_dnscache(int dns_fd, int userid, struct query *q)
 
 #endif /* DNSCACHE_LEN */
 
-static inline void
-save_to_qmem(unsigned char *qmem_cmc, unsigned short *qmem_type, int qmem_len,
-	     int *qmem_lastfilled, unsigned char *cmc_to_add,
-	     unsigned short type_to_add)
+static inline void save_to_qmem(unsigned char *qmem_cmc,
+				unsigned short *qmem_type, int qmem_len,
+				int *qmem_lastfilled,
+				unsigned char *cmc_to_add,
+				unsigned short type_to_add)
 /* Remember query to check for duplicates */
 {
 	int fill;
@@ -413,8 +443,7 @@ save_to_qmem(unsigned char *qmem_cmc, unsigned short *qmem_type, int qmem_len,
 	*qmem_lastfilled = fill;
 }
 
-static inline void
-save_to_qmem_pingordata(int userid, struct query *q)
+static inline void save_to_qmem_pingordata(int userid, struct query *q)
 {
 	/* Our CMC is a bit more than the "official" CMC; we store 4 bytes
 	   just because we can, and because it may prevent some false matches.
@@ -437,7 +466,7 @@ save_to_qmem_pingordata(int userid, struct query *q)
 
 		/* We already unpacked in handle_null_request(), but that's
 		   lost now... Note: b32 directly, we want no undotify here! */
-		i = b32->decode(cmc, &cmcsize, q->name + 1, (cp - q->name) - 1);
+		i = base32_ops.decode(cmc, &cmcsize, q->name + 1, (cp - q->name) - 1);
 
 		if (i < 4)
 			return;	 /* illegal ping; shouldn't happen */
@@ -469,10 +498,9 @@ save_to_qmem_pingordata(int userid, struct query *q)
 	}
 }
 
-static int
-answer_from_qmem(int dns_fd, struct query *q, unsigned char *qmem_cmc,
-		 unsigned short *qmem_type, int qmem_len,
-		 unsigned char *cmc_to_check)
+static int answer_from_qmem(int dns_fd, struct query *q,
+			    unsigned char *qmem_cmc, unsigned short *qmem_type,
+			    int qmem_len, unsigned char *cmc_to_check)
 /* Checks query memory and sends an (illegal) answer if this is a duplicate.
    Returns: 1 = answer sent, drop this query, 0 = no answer sent, this is
    not a duplicate. */
@@ -502,9 +530,9 @@ answer_from_qmem(int dns_fd, struct query *q, unsigned char *qmem_cmc,
 	return 0;
 }
 
-static inline int
-answer_from_qmem_data(int dns_fd, int userid, struct query *q)
 /* Quick helper function to keep handle_null_request() clean */
+static inline int answer_from_qmem_data(int dns_fd, int userid,
+					struct query *q)
 {
 	char cmc[4];
 	int i;
@@ -520,8 +548,6 @@ answer_from_qmem_data(int dns_fd, int userid, struct query *q)
 				(void *) cmc);
 }
 
-static int
-send_chunk_or_dataless(int dns_fd, int userid, struct query *q)
 /* Sends current fragment to user, or dataless packet if there is no
    current fragment available (-> normal "quiet" ping reply).
    Does not update anything, except:
@@ -531,6 +557,7 @@ send_chunk_or_dataless(int dns_fd, int userid, struct query *q)
    Returns: 1 = can call us again immediately, new packet from queue;
    0 = don't call us again for now.
 */
+static int send_chunk_or_dataless(int dns_fd, int userid, struct query *q)
 {
 	char pkt[4096];
 	int datalen = 0;
@@ -614,8 +641,7 @@ send_chunk_or_dataless(int dns_fd, int userid, struct query *q)
 	return 0;	/* don't call us again */
 }
 
-static int
-tunnel_tun(int tun_fd, int dns_fd)
+static int tunnel_tun(int tun_fd, struct dnsfd *dns_fds)
 {
 	unsigned long outlen;
 	struct ip *header;
@@ -650,13 +676,17 @@ tunnel_tun(int tun_fd, int dns_fd)
 		start_new_outpacket(userid, out, outlen);
 
 		/* Start sending immediately if query is waiting */
-		if (users[userid].q_sendrealsoon.id != 0)
+		if (users[userid].q_sendrealsoon.id != 0) {
+			int dns_fd = get_dns_fd(dns_fds, &users[userid].q_sendrealsoon.from);
 			send_chunk_or_dataless(dns_fd, userid, &users[userid].q_sendrealsoon);
-		else if (users[userid].q.id != 0)
+		} else if (users[userid].q.id != 0) {
+			int dns_fd = get_dns_fd(dns_fds, &users[userid].q.from);
 			send_chunk_or_dataless(dns_fd, userid, &users[userid].q);
+		}
 
 		return outlen;
 	} else { /* CONN_RAW_UDP */
+		int dns_fd = get_dns_fd(dns_fds, &users[userid].q.from);
 		send_raw(dns_fd, out, outlen, userid, RAW_HDR_CMD_DATA, &users[userid].q);
 		return outlen;
 	}
@@ -668,8 +698,8 @@ typedef enum {
 	VERSION_FULL
 } version_ack_t;
 
-static void
-send_version_response(int fd, version_ack_t ack, uint32_t payload, int userid, struct query *q)
+static void send_version_response(int fd, version_ack_t ack, uint32_t payload,
+				  int userid, struct query *q)
 {
 	char out[9];
 
@@ -694,12 +724,11 @@ send_version_response(int fd, version_ack_t ack, uint32_t payload, int userid, s
 	write_dns(fd, q, out, sizeof(out), users[userid].downenc);
 }
 
-static void
-process_downstream_ack(int userid, int down_seq, int down_frag)
 /* Process acks from downstream fragments.
    After this, .offset and .fragment are updated (if ack correct),
    or .len is set to zero when all is done.
 */
+static void process_downstream_ack(int userid, int down_seq, int down_frag)
 {
 	if (users[userid].outpacket.len <= 0)
 		/* No packet to apply acks to */
@@ -733,7 +762,7 @@ process_downstream_ack(int userid, int down_seq, int down_frag)
 }
 
 static void
-handle_null_request(int tun_fd, int dns_fd, struct query *q, int domain_len)
+handle_null_request(int tun_fd, int dns_fd, struct dnsfd *dns_fds, struct query *q, int domain_len)
 {
 	struct in_addr tempip;
 	char in[512];
@@ -752,10 +781,10 @@ handle_null_request(int tun_fd, int dns_fd, struct query *q, int domain_len)
 
 	memcpy(in, q->name, MIN(domain_len, sizeof(in)));
 
-	if(in[0] == 'V' || in[0] == 'v') {
+	if (in[0] == 'V' || in[0] == 'v') {
 		int version = 0;
 
-		read = unpack_data(unpacked, sizeof(unpacked), &(in[1]), domain_len - 1, b32);
+		read = unpack_data(unpacked, sizeof(unpacked), &(in[1]), domain_len - 1, &base32_ops);
 		/* Version greeting, compare and send ack/nak */
 		if (read > 4) {
 			/* Received V + 32bits version */
@@ -765,19 +794,18 @@ handle_null_request(int tun_fd, int dns_fd, struct query *q, int domain_len)
 					   ((unpacked[3] & 0xff)));
 		}
 
-		if (version == VERSION) {
+		if (version == PROTOCOL_VERSION) {
 			userid = find_available_user();
 			if (userid >= 0) {
 				int i;
-				struct sockaddr_in *tempin;
 
 				users[userid].seed = rand();
 				/* Store remote IP number */
-				tempin = (struct sockaddr_in *) &(q->from);
-				memcpy(&(users[userid].host), &(tempin->sin_addr), sizeof(struct in_addr));
+				memcpy(&(users[userid].host), &(q->from), q->fromlen);
+				users[userid].hostlen = q->fromlen;
 
 				memcpy(&(users[userid].q), q, sizeof(struct query));
-				users[userid].encoder = get_base32_encoder();
+				users[userid].encoder = &base32_ops;
 				users[userid].downenc = 'T';
 				send_version_response(dns_fd, VERSION_ACK, users[userid].seed, userid, q);
 				syslog(LOG_INFO, "accepted version for user #%d from %s",
@@ -807,17 +835,17 @@ handle_null_request(int tun_fd, int dns_fd, struct query *q, int domain_len)
 #ifdef DNSCACHE_LEN
 				{
 					for (i = 0; i < DNSCACHE_LEN; i++) {
-					        users[userid].dnscache_q[i].id = 0;
-					        users[userid].dnscache_answerlen[i] = 0;
+						users[userid].dnscache_q[i].id = 0;
+						users[userid].dnscache_answerlen[i] = 0;
 					}
 				}
 				users[userid].dnscache_lastfilled = 0;
 #endif
 				for (i = 0; i < QMEMPING_LEN; i++)
-				        users[userid].qmemping_type[i] = T_UNSET;
+					users[userid].qmemping_type[i] = T_UNSET;
 				users[userid].qmemping_lastfilled = 0;
 				for (i = 0; i < QMEMDATA_LEN; i++)
-				        users[userid].qmemdata_type[i] = T_UNSET;
+					users[userid].qmemdata_type[i] = T_UNSET;
 				users[userid].qmemdata_lastfilled = 0;
 			} else {
 				/* No space for another user */
@@ -826,13 +854,13 @@ handle_null_request(int tun_fd, int dns_fd, struct query *q, int domain_len)
 					format_addr(&q->from, q->fromlen));
 			}
 		} else {
-			send_version_response(dns_fd, VERSION_NACK, VERSION, 0, q);
+			send_version_response(dns_fd, VERSION_NACK, PROTOCOL_VERSION, 0, q);
 			syslog(LOG_INFO, "dropped user from %s, sent bad version %08X",
 				format_addr(&q->from, q->fromlen), version);
 		}
 		return;
-	} else if(in[0] == 'L' || in[0] == 'l') {
-		read = unpack_data(unpacked, sizeof(unpacked), &(in[1]), domain_len - 1, b32);
+	} else if (in[0] == 'L' || in[0] == 'l') {
+		read = unpack_data(unpacked, sizeof(unpacked), &(in[1]), domain_len - 1, &base32_ops);
 		if (read < 17) {
 			write_dns(dns_fd, q, "BADLEN", 6, 'T');
 			return;
@@ -876,11 +904,10 @@ handle_null_request(int tun_fd, int dns_fd, struct query *q, int domain_len)
 			}
 		}
 		return;
-	} else if(in[0] == 'I' || in[0] == 'i') {
+	} else if (in[0] == 'I' || in[0] == 'i') {
 		/* Request for IP number */
-		in_addr_t replyaddr;
-		unsigned addr;
-		char reply[5];
+		char reply[17];
+		int length;
 
 		userid = b32_8to5(in[1]);
 		if (check_authenticated_user_and_ip(userid, q) != 0) {
@@ -888,31 +915,35 @@ handle_null_request(int tun_fd, int dns_fd, struct query *q, int domain_len)
 			return; /* illegal id */
 		}
 
-		if (ns_ip != INADDR_ANY) {
-			/* If set, use assigned external ip (-n option) */
-			replyaddr = ns_ip;
+		reply[0] = 'I';
+		if (q->from.ss_family == AF_INET) {
+			if (ns_ip != INADDR_ANY) {
+				/* If set, use assigned external ip (-n option) */
+				memcpy(&reply[1], &ns_ip, sizeof(ns_ip));
+			} else {
+				/* otherwise return destination ip from packet */
+				struct sockaddr_in *addr = (struct sockaddr_in *) &q->destination;
+				memcpy(&reply[1], &addr->sin_addr, sizeof(struct in_addr));
+			}
+			length = 1 + sizeof(struct in_addr);
 		} else {
-			/* otherwise return destination ip from packet */
-			memcpy(&replyaddr, &q->destination.s_addr, sizeof(in_addr_t));
+			struct sockaddr_in6 *addr = (struct sockaddr_in6 *) &q->destination;
+			memcpy(&reply[1], &addr->sin6_addr, sizeof(struct in6_addr));
+			length = 1 + sizeof(struct in6_addr);
 		}
 
-		addr = htonl(replyaddr);
-		reply[0] = 'I';
-		reply[1] = (addr >> 24) & 0xFF;
-		reply[2] = (addr >> 16) & 0xFF;
-		reply[3] = (addr >>  8) & 0xFF;
-		reply[4] = (addr >>  0) & 0xFF;
-		write_dns(dns_fd, q, reply, sizeof(reply), 'T');
-	} else if(in[0] == 'Z' || in[0] == 'z') {
+		write_dns(dns_fd, q, reply, length, 'T');
+	} else if (in[0] == 'Z' || in[0] == 'z') {
 		/* Check for case conservation and chars not allowed according to RFC */
 
 		/* Reply with received hostname as data */
 		/* No userid here, reply with lowest-grade downenc */
 		write_dns(dns_fd, q, in, domain_len, 'T');
 		return;
-	} else if(in[0] == 'S' || in[0] == 's') {
+	} else if (in[0] == 'S' || in[0] == 's') {
 		int codec;
-		struct encoder *enc;
+		const struct encoder *enc;
+
 		if (domain_len < 3) { /* len at least 3, example: "S15" */
 			write_dns(dns_fd, q, "BADLEN", 6, 'T');
 			return;
@@ -920,7 +951,7 @@ handle_null_request(int tun_fd, int dns_fd, struct query *q, int domain_len)
 
 		userid = b32_8to5(in[1]);
 
-		if (check_authenticated_user_and_ip(userid, q) != 0) {
+		if (check_authenticated_user_and_ip_and_options(userid, q) != 0) {
 			write_dns(dns_fd, q, "BADIP", 5, 'T');
 			return; /* illegal id */
 		}
@@ -929,22 +960,22 @@ handle_null_request(int tun_fd, int dns_fd, struct query *q, int domain_len)
 
 		switch (codec) {
 		case 5: /* 5 bits per byte = base32 */
-			enc = get_base32_encoder();
+			enc = &base32_ops;
 			user_switch_codec(userid, enc);
 			write_dns(dns_fd, q, enc->name, strlen(enc->name), users[userid].downenc);
 			break;
 		case 6: /* 6 bits per byte = base64 */
-			enc = get_base64_encoder();
+			enc = &base64_ops;
 			user_switch_codec(userid, enc);
 			write_dns(dns_fd, q, enc->name, strlen(enc->name), users[userid].downenc);
 			break;
 		case 26: /* "2nd" 6 bits per byte = base64u, with underscore */
-			enc = get_base64u_encoder();
+			enc = &base64u_ops;
 			user_switch_codec(userid, enc);
 			write_dns(dns_fd, q, enc->name, strlen(enc->name), users[userid].downenc);
 			break;
 		case 7: /* 7 bits per byte = base128 */
-			enc = get_base128_encoder();
+			enc = &base128_ops;
 			user_switch_codec(userid, enc);
 			write_dns(dns_fd, q, enc->name, strlen(enc->name), users[userid].downenc);
 			break;
@@ -953,7 +984,7 @@ handle_null_request(int tun_fd, int dns_fd, struct query *q, int domain_len)
 			break;
 		}
 		return;
-	} else if(in[0] == 'O' || in[0] == 'o') {
+	} else if (in[0] == 'O' || in[0] == 'o') {
 		if (domain_len < 3) { /* len at least 3, example: "O1T" */
 			write_dns(dns_fd, q, "BADLEN", 6, 'T');
 			return;
@@ -961,7 +992,7 @@ handle_null_request(int tun_fd, int dns_fd, struct query *q, int domain_len)
 
 		userid = b32_8to5(in[1]);
 
-		if (check_authenticated_user_and_ip(userid, q) != 0) {
+		if (check_authenticated_user_and_ip_and_options(userid, q) != 0) {
 			write_dns(dns_fd, q, "BADIP", 5, 'T');
 			return; /* illegal id */
 		}
@@ -1007,7 +1038,7 @@ handle_null_request(int tun_fd, int dns_fd, struct query *q, int domain_len)
 			break;
 		}
 		return;
-	} else if(in[0] == 'Y' || in[0] == 'y') {
+	} else if (in[0] == 'Y' || in[0] == 'y') {
 		int i;
 		char *datap;
 		int datalen;
@@ -1079,7 +1110,7 @@ handle_null_request(int tun_fd, int dns_fd, struct query *q, int domain_len)
 		write_dns(dns_fd, q, "BADCODEC", 8, 'T');
 		return;
 
-	} else if(in[0] == 'R' || in[0] == 'r') {
+	} else if (in[0] == 'R' || in[0] == 'r') {
 		int req_frag_size;
 
 		if (domain_len < 16) {  /* we'd better have some chars for data... */
@@ -1112,10 +1143,10 @@ handle_null_request(int tun_fd, int dns_fd, struct query *q, int domain_len)
 			write_dns(dns_fd, q, buf, req_frag_size, users[userid].downenc);
 		}
 		return;
-	} else if(in[0] == 'N' || in[0] == 'n') {
+	} else if (in[0] == 'N' || in[0] == 'n') {
 		int max_frag_size;
 
-		read = unpack_data(unpacked, sizeof(unpacked), &(in[1]), domain_len - 1, b32);
+		read = unpack_data(unpacked, sizeof(unpacked), &(in[1]), domain_len - 1, &base32_ops);
 
 		if (read < 3) {
 			write_dns(dns_fd, q, "BADLEN", 6, 'T');
@@ -1124,7 +1155,7 @@ handle_null_request(int tun_fd, int dns_fd, struct query *q, int domain_len)
 
 		/* Downstream fragsize packet */
 		userid = unpacked[0];
-		if (check_authenticated_user_and_ip(userid, q) != 0) {
+		if (check_authenticated_user_and_ip_and_options(userid, q) != 0) {
 			write_dns(dns_fd, q, "BADIP", 5, 'T');
 			return; /* illegal id */
 		}
@@ -1134,10 +1165,11 @@ handle_null_request(int tun_fd, int dns_fd, struct query *q, int domain_len)
 			write_dns(dns_fd, q, "BADFRAG", 7, users[userid].downenc);
 		} else {
 			users[userid].fragsize = max_frag_size;
+			users[userid].options_locked = 1;
 			write_dns(dns_fd, q, &unpacked[1], 2, users[userid].downenc);
 		}
 		return;
-	} else if(in[0] == 'P' || in[0] == 'p') {
+	} else if (in[0] == 'P' || in[0] == 'p') {
 		int dn_seq;
 		int dn_frag;
 		int didsend = 0;
@@ -1151,7 +1183,7 @@ handle_null_request(int tun_fd, int dns_fd, struct query *q, int domain_len)
 		if (q->id == 0)
 			return;
 
-		read = unpack_data(unpacked, sizeof(unpacked), &(in[1]), domain_len - 1, b32);
+		read = unpack_data(unpacked, sizeof(unpacked), &(in[1]), domain_len - 1, &base32_ops);
 		if (read < 4)
 			return;
 
@@ -1257,7 +1289,7 @@ handle_null_request(int tun_fd, int dns_fd, struct query *q, int domain_len)
 		    !users[userid].lazy)
 			send_chunk_or_dataless(dns_fd, userid, &users[userid].q);
 
-	} else if((in[0] >= '0' && in[0] <= '9')
+	} else if ((in[0] >= '0' && in[0] <= '9')
 			|| (in[0] >= 'a' && in[0] <= 'f')
 			|| (in[0] >= 'A' && in[0] <= 'F')) {
 		int up_seq, up_frag, dn_seq, dn_frag, lastfrag;
@@ -1412,7 +1444,7 @@ handle_null_request(int tun_fd, int dns_fd, struct query *q, int domain_len)
 		}
 
 		if (upstream_ok && lastfrag) { /* packet is complete */
-			handle_full_packet(tun_fd, dns_fd, userid);
+			handle_full_packet(tun_fd, dns_fds, userid);
 		}
 
 		/* If there is a query that must be returned real soon, do it.
@@ -1491,19 +1523,24 @@ handle_null_request(int tun_fd, int dns_fd, struct query *q, int domain_len)
 }
 
 static void
-handle_ns_request(int dns_fd, struct query *q)
+handle_ns_request(int dns_fd, struct query *q, int topdomain_offset)
 /* Mostly identical to handle_a_request() below */
 {
 	char buf[64*1024];
 	int len;
+	/* Use possibly dynamic top domain in reply */
+	char *resp_domain = q->name + topdomain_offset;
 
 	if (ns_ip != INADDR_ANY) {
 		/* If ns_ip set, overwrite destination addr with it.
 		 * Destination addr will be sent as additional record (A, IN) */
-		memcpy(&q->destination.s_addr, &ns_ip, sizeof(in_addr_t));
+		struct sockaddr_in *addr = (struct sockaddr_in *) &q->destination;
+		addr->sin_family = AF_INET;
+		memcpy(&addr->sin_addr, &ns_ip, sizeof(ns_ip));
+		q->dest_len = sizeof(*addr);
 	}
 
-	len = dns_encode_ns_response(buf, sizeof(buf), q, topdomain);
+	len = dns_encode_ns_response(buf, sizeof(buf), q, resp_domain);
 	if (len < 1) {
 		warnx("dns_encode_ns_response doesn't fit");
 		return;
@@ -1527,13 +1564,23 @@ handle_a_request(int dns_fd, struct query *q, int fakeip)
 
 	if (fakeip) {
 		in_addr_t ip = inet_addr("127.0.0.1");
-		memcpy(&q->destination.s_addr, &ip, sizeof(in_addr_t));
-
+		struct sockaddr_in *addr = (struct sockaddr_in *) &q->destination;
+		addr->sin_family = AF_INET;
+		memcpy(&addr->sin_addr, &ip, sizeof(ip));
+		q->dest_len = sizeof(*addr);
 	} else if (ns_ip != INADDR_ANY) {
 		/* If ns_ip set, overwrite destination addr with it.
 		 * Destination addr will be sent as additional record (A, IN) */
-		memcpy(&q->destination.s_addr, &ns_ip, sizeof(in_addr_t));
+		struct sockaddr_in *addr = (struct sockaddr_in *) &q->destination;
+		addr->sin_family = AF_INET;
+		memcpy(&addr->sin_addr, &ns_ip, sizeof(ns_ip));
+		q->dest_len = sizeof(*addr);
 	}
+
+	/* Give up if no IPv4 address known (when A request received over IPv6
+	 * and destination was not overwritten above) */
+	if (q->destination.ss_family != AF_INET)
+		return;
 
 	len = dns_encode_a_response(buf, sizeof(buf), q);
 	if (len < 1) {
@@ -1586,13 +1633,14 @@ forward_query(int bind_fd, struct query *q)
 }
 
 static int
-tunnel_bind(int bind_fd, int dns_fd)
+tunnel_bind(int bind_fd, struct dnsfd *dns_fds)
 {
 	char packet[64*1024];
 	struct sockaddr_storage from;
 	socklen_t fromlen;
 	struct fw_query *query;
 	unsigned short id;
+	int dns_fd;
 	int r;
 
 	fromlen = sizeof(struct sockaddr);
@@ -1622,6 +1670,7 @@ tunnel_bind(int bind_fd, int dns_fd)
 			format_addr(&query->addr, query->addrlen), (id & 0xffff), r);
 	}
 
+	dns_fd = get_dns_fd(dns_fds, &query->addr);
 	if (sendto(dns_fd, packet, r, 0, (const struct sockaddr *) &(query->addr),
 		query->addrlen) <= 0) {
 		warn("forward reply error");
@@ -1631,14 +1680,13 @@ tunnel_bind(int bind_fd, int dns_fd)
 }
 
 static int
-tunnel_dns(int tun_fd, int dns_fd, int bind_fd)
+tunnel_dns(int tun_fd, int dns_fd, struct dnsfd *dns_fds, int bind_fd)
 {
 	struct query q;
 	int read;
 	int domain_len;
-	int inside_topdomain = 0;
 
-	if ((read = read_dns(dns_fd, tun_fd, &q)) <= 0)
+	if ((read = read_dns(dns_fd, dns_fds, tun_fd, &q)) <= 0)
 		return 0;
 
 	if (debug >= 2) {
@@ -1646,14 +1694,8 @@ tunnel_dns(int tun_fd, int dns_fd, int bind_fd)
 			format_addr(&q.from, q.fromlen), q.type, q.name);
 	}
 
-	domain_len = strlen(q.name) - strlen(topdomain);
-	if (domain_len >= 0 && !strcasecmp(q.name + domain_len, topdomain))
-		inside_topdomain = 1;
-	/* require dot before topdomain */
-	if (domain_len >= 1 && q.name[domain_len - 1] != '.')
-		inside_topdomain = 0;
-
-	if (inside_topdomain) {
+	domain_len = query_datalen(q.name, topdomain);
+	if (domain_len >= 0) {
 		/* This is a query we can handle */
 
 		/* Handle A-type query for ns.topdomain, possibly caused
@@ -1686,10 +1728,10 @@ tunnel_dns(int tun_fd, int dns_fd, int bind_fd)
 		case T_SRV:
 		case T_TXT:
 			/* encoding is "transparent" here */
-			handle_null_request(tun_fd, dns_fd, &q, domain_len);
+			handle_null_request(tun_fd, dns_fd, dns_fds, &q, domain_len);
 			break;
 		case T_NS:
-			handle_ns_request(dns_fd, &q);
+			handle_ns_request(dns_fd, &q, domain_len);
 			break;
 		default:
 			break;
@@ -1704,7 +1746,7 @@ tunnel_dns(int tun_fd, int dns_fd, int bind_fd)
 }
 
 static int
-tunnel(int tun_fd, int dns_fd, int bind_fd, int max_idle_time)
+tunnel(int tun_fd, struct dnsfd *dns_fds, int bind_fd, int max_idle_time)
 {
 	struct timeval tv;
 	fd_set fds;
@@ -1736,9 +1778,16 @@ tunnel(int tun_fd, int dns_fd, int bind_fd, int max_idle_time)
 		}
 
 		FD_ZERO(&fds);
+		maxfd = 0;
 
-		FD_SET(dns_fd, &fds);
-		maxfd = dns_fd;
+		if (dns_fds->v4fd >= 0) {
+			FD_SET(dns_fds->v4fd, &fds);
+			maxfd = MAX(dns_fds->v4fd, maxfd);
+		}
+		if (dns_fds->v6fd >= 0) {
+			FD_SET(dns_fds->v6fd, &fds);
+			maxfd = MAX(dns_fds->v6fd, maxfd);
+		}
 
 		if (bind_fd) {
 			/* wait for replies from real DNS */
@@ -1748,26 +1797,27 @@ tunnel(int tun_fd, int dns_fd, int bind_fd, int max_idle_time)
 
 		/* Don't read from tun if no users can accept data anyway;
 		   tun queue/TCP buffers are larger than our outpacket-queues */
-		if(!all_users_waiting_to_send()) {
+		if (!all_users_waiting_to_send()) {
 			FD_SET(tun_fd, &fds);
 			maxfd = MAX(tun_fd, maxfd);
 		}
 
 		i = select(maxfd + 1, &fds, NULL, NULL, &tv);
 
-		if(i < 0) {
+		if (i < 0) {
 			if (running)
 				warn("select");
 			return 1;
 		}
 
-		if (i==0) {
+		if (i == 0) {
 			if (max_idle_time) {
-				/* only trigger the check if that's worth ( ie, no need to loop over if there
+				/* only trigger the check if that's worth (ie, no need to loop over if there
 				is something to send */
 				if (last_action + max_idle_time < time(NULL)) {
 					for (userid = 0; userid < created_users; userid++) {
-						last_action = ( users[userid].last_pkt > last_action ) ? users[userid].last_pkt : last_action;
+						last_action = (users[userid].last_pkt > last_action) ?
+							users[userid].last_pkt : last_action;
 					}
 					if (last_action + max_idle_time < time(NULL)) {
 						fprintf(stderr, "Idling since too long, shutting down...\n");
@@ -1775,15 +1825,18 @@ tunnel(int tun_fd, int dns_fd, int bind_fd, int max_idle_time)
 					}
 				}
 			}
- 		} else {
- 			if (FD_ISSET(tun_fd, &fds)) {
- 				tunnel_tun(tun_fd, dns_fd);
- 			}
- 			if (FD_ISSET(dns_fd, &fds)) {
- 				tunnel_dns(tun_fd, dns_fd, bind_fd);
- 			}
+		} else {
+			if (FD_ISSET(tun_fd, &fds)) {
+				tunnel_tun(tun_fd, dns_fds);
+			}
+			if (dns_fds->v4fd >= 0 && FD_ISSET(dns_fds->v4fd, &fds)) {
+				tunnel_dns(tun_fd, dns_fds->v4fd, dns_fds, bind_fd);
+			}
+			if (dns_fds->v6fd >= 0 && FD_ISSET(dns_fds->v6fd, &fds)) {
+				tunnel_dns(tun_fd, dns_fds->v6fd, dns_fds, bind_fd);
+			}
 			if (FD_ISSET(bind_fd, &fds)) {
-				tunnel_bind(bind_fd, dns_fd);
+				tunnel_bind(bind_fd, dns_fds);
 			}
 		}
 
@@ -1793,15 +1846,17 @@ tunnel(int tun_fd, int dns_fd, int bind_fd, int max_idle_time)
 			    users[userid].last_pkt + 60 > time(NULL) &&
 			    users[userid].q_sendrealsoon.id != 0 &&
 			    users[userid].conn == CONN_DNS_NULL &&
-			    !users[userid].q_sendrealsoon_new)
+			    !users[userid].q_sendrealsoon_new) {
+				int dns_fd = get_dns_fd(dns_fds, &users[userid].q_sendrealsoon.from);
 				send_chunk_or_dataless(dns_fd, userid, &users[userid].q_sendrealsoon);
+			}
 	}
 
 	return 0;
 }
 
 static void
-handle_full_packet(int tun_fd, int dns_fd, int userid)
+handle_full_packet(int tun_fd, struct dnsfd *dns_fds, int userid)
 {
 	unsigned long outlen;
 	char out[64*1024];
@@ -1830,10 +1885,13 @@ handle_full_packet(int tun_fd, int dns_fd, int userid)
 						users[userid].inpacket.len);
 
 					/* Start sending immediately if query is waiting */
-					if (users[touser].q_sendrealsoon.id != 0)
+					if (users[touser].q_sendrealsoon.id != 0) {
+						int dns_fd = get_dns_fd(dns_fds, &users[touser].q_sendrealsoon.from);
 						send_chunk_or_dataless(dns_fd, touser, &users[touser].q_sendrealsoon);
-					else if (users[touser].q.id != 0)
+					} else if (users[touser].q.id != 0) {
+						int dns_fd = get_dns_fd(dns_fds, &users[touser].q.from);
 						send_chunk_or_dataless(dns_fd, touser, &users[touser].q);
+					}
 #ifdef OUTPACKETQ_LEN
 				} else {
 					save_to_outpacketq(touser,
@@ -1842,6 +1900,7 @@ handle_full_packet(int tun_fd, int dns_fd, int userid)
 #endif
 				}
 			} else{ /* CONN_RAW_UDP */
+				int dns_fd = get_dns_fd(dns_fds, &users[touser].q.from);
 				send_raw(dns_fd, users[userid].inpacket.data,
 					 users[userid].inpacket.len, touser,
 					 RAW_HDR_CMD_DATA, &users[touser].q);
@@ -1879,15 +1938,13 @@ handle_raw_login(char *packet, int len, struct query *q, int fd, int userid)
 	/* User sends hash of seed + 1 */
 	login_calculate(myhash, 16, password, users[userid].seed + 1);
 	if (memcmp(packet, myhash, 16) == 0) {
-		struct sockaddr_in *tempin;
-
 		/* Update query and time info for user */
 		users[userid].last_pkt = time(NULL);
 		memcpy(&(users[userid].q), q, sizeof(struct query));
 
 		/* Store remote IP number */
-		tempin = (struct sockaddr_in *) &(q->from);
-		memcpy(&(users[userid].host), &(tempin->sin_addr), sizeof(struct in_addr));
+		memcpy(&(users[userid].host), &(q->from), q->fromlen);
+		users[userid].hostlen = q->fromlen;
 
 		/* Correct hash, reply with hash of seed - 1 */
 		user_set_conn_type(userid, CONN_RAW_UDP);
@@ -1899,7 +1956,7 @@ handle_raw_login(char *packet, int len, struct query *q, int fd, int userid)
 }
 
 static void
-handle_raw_data(char *packet, int len, struct query *q, int dns_fd, int tun_fd, int userid)
+handle_raw_data(char *packet, int len, struct query *q, struct dnsfd *dns_fds, int tun_fd, int userid)
 {
 	if (check_authenticated_user_and_ip(userid, q) != 0) {
 		return;
@@ -1920,7 +1977,7 @@ handle_raw_data(char *packet, int len, struct query *q, int dns_fd, int tun_fd, 
 			users[userid].inpacket.len, userid);
 	}
 
-	handle_full_packet(tun_fd, dns_fd, userid);
+	handle_full_packet(tun_fd, dns_fds, userid);
 }
 
 static void
@@ -1944,7 +2001,7 @@ handle_raw_ping(struct query *q, int dns_fd, int userid)
 }
 
 static int
-raw_decode(char *packet, int len, struct query *q, int dns_fd, int tun_fd)
+raw_decode(char *packet, int len, struct query *q, int dns_fd, struct dnsfd *dns_fds, int tun_fd)
 {
 	int raw_user;
 
@@ -1961,7 +2018,7 @@ raw_decode(char *packet, int len, struct query *q, int dns_fd, int tun_fd)
 		break;
 	case RAW_HDR_CMD_DATA:
 		/* Data packet */
-		handle_raw_data(&packet[RAW_HDR_LEN], len - RAW_HDR_LEN, q, dns_fd, tun_fd, raw_user);
+		handle_raw_data(&packet[RAW_HDR_LEN], len - RAW_HDR_LEN, q, dns_fds, tun_fd, raw_user);
 		break;
 	case RAW_HDR_CMD_PING:
 		/* Keepalive packet */
@@ -1975,19 +2032,20 @@ raw_decode(char *packet, int len, struct query *q, int dns_fd, int tun_fd)
 }
 
 static int
-read_dns(int fd, int tun_fd, struct query *q) /* FIXME: tun_fd is because of raw_decode() below */
+read_dns(int fd, struct dnsfd *dns_fds, int tun_fd, struct query *q)
+/* FIXME: dns_fds and tun_fd are because of raw_decode() below */
 {
-	struct sockaddr_in from;
+	struct sockaddr_storage from;
 	socklen_t addrlen;
 	char packet[64*1024];
 	int r;
 #ifndef WINDOWS32
-	char address[96];
+	char control[CMSG_SPACE(sizeof (struct in6_pktinfo))];
 	struct msghdr msg;
 	struct iovec iov;
 	struct cmsghdr *cmsg;
 
-	addrlen = sizeof(struct sockaddr);
+	addrlen = sizeof(struct sockaddr_storage);
 	iov.iov_base = packet;
 	iov.iov_len = sizeof(packet);
 
@@ -1995,13 +2053,13 @@ read_dns(int fd, int tun_fd, struct query *q) /* FIXME: tun_fd is because of raw
 	msg.msg_namelen = (unsigned) addrlen;
 	msg.msg_iov = &iov;
 	msg.msg_iovlen = 1;
-	msg.msg_control = address;
-	msg.msg_controllen = sizeof(address);
+	msg.msg_control = control;
+	msg.msg_controllen = sizeof(control);
 	msg.msg_flags = 0;
 
 	r = recvmsg(fd, &msg, 0);
 #else
-	addrlen = sizeof(struct sockaddr);
+	addrlen = sizeof(struct sockaddr_storage);
 	r = recvfrom(fd, packet, sizeof(packet), 0, (struct sockaddr*)&from, &addrlen);
 #endif /* !WINDOWS32 */
 
@@ -2010,21 +2068,37 @@ read_dns(int fd, int tun_fd, struct query *q) /* FIXME: tun_fd is because of raw
 		q->fromlen = addrlen;
 
 		/* TODO do not handle raw packets here! */
-		if (raw_decode(packet, r, q, fd, tun_fd)) {
+		if (raw_decode(packet, r, q, fd, dns_fds, tun_fd)) {
 			return 0;
 		}
-		if (dns_decode(NULL, 0, q, QR_QUERY, packet, r) < 0) {
+		if (dns_decode(NULL, 0, q, QR_QUERY, packet, r) <= 0) {
 			return 0;
 		}
 
 #ifndef WINDOWS32
+		memset(&q->destination, 0, sizeof(struct sockaddr_storage));
+		/* Read destination IP address */
 		for (cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL;
 			cmsg = CMSG_NXTHDR(&msg, cmsg)) {
 
 			if (cmsg->cmsg_level == IPPROTO_IP &&
 				cmsg->cmsg_type == DSTADDR_SOCKOPT) {
 
-				q->destination = *dstaddr(cmsg);
+				struct sockaddr_in *addr = (struct sockaddr_in *) &q->destination;
+				addr->sin_family = AF_INET;
+				addr->sin_addr = *dstaddr(cmsg);
+				q->dest_len = sizeof(*addr);
+				break;
+			}
+			if (cmsg->cmsg_level == IPPROTO_IPV6 &&
+				cmsg->cmsg_type == IPV6_PKTINFO) {
+
+				struct in6_pktinfo *pktinfo;
+				struct sockaddr_in6 *addr = (struct sockaddr_in6 *) &q->destination;
+				pktinfo = (struct in6_pktinfo *) CMSG_DATA(cmsg);
+				addr->sin6_family = AF_INET6;
+				memcpy(&addr->sin6_addr, &pktinfo->ipi6_addr, sizeof(struct in6_addr));
+				q->dest_len = sizeof(*addr);
 				break;
 			}
 		}
@@ -2040,7 +2114,7 @@ read_dns(int fd, int tun_fd, struct query *q) /* FIXME: tun_fd is because of raw
 }
 
 static size_t
-write_dns_nameenc(char *buf, size_t buflen, char *data, int datalen, char downenc)
+write_dns_nameenc(char *buf, size_t buflen, const char *data, int datalen, char downenc)
 /* Returns #bytes of data that were encoded */
 {
 	static int td1 = 0;
@@ -2065,31 +2139,31 @@ write_dns_nameenc(char *buf, size_t buflen, char *data, int datalen, char downen
 
 	if (downenc == 'S') {
 		buf[0] = 'i';
-		if (!b64->places_dots())
+		if (!base64_ops.places_dots)
 			space -= (space / 57);	/* space for dots */
-		b64->encode(buf+1, &space, data, datalen);
-		if (!b64->places_dots())
+		base64_ops.encode(buf+1, &space, data, datalen);
+		if (!base64_ops.places_dots)
 			inline_dotify(buf, buflen);
 	} else if (downenc == 'U') {
 		buf[0] = 'j';
-		if (!b64u->places_dots())
+		if (!base64u_ops.places_dots)
 			space -= (space / 57);	/* space for dots */
-		b64u->encode(buf+1, &space, data, datalen);
-		if (!b64u->places_dots())
+		base64u_ops.encode(buf+1, &space, data, datalen);
+		if (!base64u_ops.places_dots)
 			inline_dotify(buf, buflen);
 	} else if (downenc == 'V') {
 		buf[0] = 'k';
-		if (!b128->places_dots())
+		if (!base128_ops.places_dots)
 			space -= (space / 57);	/* space for dots */
-		b128->encode(buf+1, &space, data, datalen);
-		if (!b128->places_dots())
+		base128_ops.encode(buf+1, &space, data, datalen);
+		if (!base128_ops.places_dots)
 			inline_dotify(buf, buflen);
 	} else {
 		buf[0] = 'h';
-		if (!b32->places_dots())
+		if (!base32_ops.places_dots)
 			space -= (space / 57);	/* space for dots */
-		b32->encode(buf+1, &space, data, datalen);
-		if (!b32->places_dots())
+		base32_ops.encode(buf+1, &space, data, datalen);
+		if (!base32_ops.places_dots)
 			inline_dotify(buf, buflen);
 	}
 
@@ -2098,7 +2172,7 @@ write_dns_nameenc(char *buf, size_t buflen, char *data, int datalen, char downen
 	b += strlen(buf) - 1;
 	if (*b != '.')
 		*++b = '.';
-        b++;
+	b++;
 
 	*b = 'a' + td1;
 	b++;
@@ -2110,7 +2184,7 @@ write_dns_nameenc(char *buf, size_t buflen, char *data, int datalen, char downen
 }
 
 static void
-write_dns(int fd, struct query *q, char *data, int datalen, char downenc)
+write_dns(int fd, struct query *q, const char *data, int datalen, char downenc)
 {
 	char buf[64*1024];
 	int len = 0;
@@ -2160,15 +2234,15 @@ write_dns(int fd, struct query *q, char *data, int datalen, char downenc)
 
 		if (downenc == 'S') {
 			txtbuf[0] = 's';	/* plain base64(Sixty-four) */
-			len = b64->encode(txtbuf+1, &space, data, datalen);
+			len = base64_ops.encode(txtbuf+1, &space, data, datalen);
 		}
 		else if (downenc == 'U') {
 			txtbuf[0] = 'u';	/* Base64 with Underscore */
-			len = b64u->encode(txtbuf+1, &space, data, datalen);
+			len = base64u_ops.encode(txtbuf+1, &space, data, datalen);
 		}
 		else if (downenc == 'V') {
 			txtbuf[0] = 'v';	/* Base128 */
-			len = b128->encode(txtbuf+1, &space, data, datalen);
+			len = base128_ops.encode(txtbuf+1, &space, data, datalen);
 		}
 		else if (downenc == 'R') {
 			txtbuf[0] = 'r';	/* Raw binary data */
@@ -2176,7 +2250,7 @@ write_dns(int fd, struct query *q, char *data, int datalen, char downenc)
 			memcpy(txtbuf + 1, data, len);
 		} else {
 			txtbuf[0] = 't';	/* plain base32(Thirty-two) */
-			len = b32->encode(txtbuf+1, &space, data, datalen);
+			len = base32_ops.encode(txtbuf+1, &space, data, datalen);
 		}
 		len = dns_encode(buf, sizeof(buf), q, QR_ANSWER, txtbuf, len+1);
 	} else {
@@ -2197,66 +2271,94 @@ write_dns(int fd, struct query *q, char *data, int datalen, char downenc)
 	sendto(fd, buf, len, 0, (struct sockaddr*)&q->from, q->fromlen);
 }
 
-static void
-usage() {
-	extern char *__progname;
+static void print_usage(FILE *stream)
+{
+	fprintf(stream,
+		"Usage: %s [-46cDfsv] [-u user] [-t chrootdir] [-d device] [-m mtu]\n"
+		"               [-z context] [-l ipv4 listen address] [-L ipv6 listen address]\n"
+		"               [-p port] [-n auto|external_ip] [-b dnsport] [-P password]\n"
+		"               [-F pidfile] [-i max idle time] tunnel_ip[/netmask] topdomain\n",
+		__progname);
+}
 
-	fprintf(stderr, "Usage: %s [-v] [-h] [-c] [-s] [-f] [-D] [-u user] "
-		"[-t chrootdir] [-d device] [-m mtu] [-z context] "
-		"[-l ip address to listen on] [-p port] [-n external ip] "
-		"[-b dnsport] [-P password] [-F pidfile] [-i max idle time] "
-		"tunnel_ip[/netmask] topdomain\n", __progname);
+static void usage(void)
+{
+	print_usage(stderr);
 	exit(2);
 }
 
-static void
-help() {
-	extern char *__progname;
+static void help(FILE *stream)
+{
+	fprintf(stream, "iodine IP over DNS tunneling server\n\n");
+	print_usage(stream);
+	fprintf(stream,
+		"\nAvailable options:\n"
+		"  -v to print version info and exit\n"
+		"  -h to print this help and exit\n"
+		"  -4 to listen only on IPv4\n"
+		"  -6 to listen only on IPv6\n"
+		"  -c to disable check of client IP/port on each request\n"
+		"  -s to skip creating and configuring the tun device,\n"
+		"     which then has to be created manually\n"
+		"  -f to keep running in foreground\n"
+		"  -D to increase debug level\n"
+		"     (using -DD in UTF-8 terminal: \"LC_ALL=C luit iodined -DD ...\")\n"
+		"  -u name to drop privileges and run as user 'name'\n"
+		"  -t dir to chroot to directory dir\n"
+		"  -d device to set tunnel device name\n"
+		"  -m mtu to set tunnel device mtu\n"
+		"  -z context to apply SELinux context after initialization\n"
+		"  -l IPv4 address to listen on for incoming dns traffic "
+		"(default 0.0.0.0)\n"
+		"     (Use 'external' to listen only on external IP, looked up via a service)\n"
+		"  -L IPv6 address to listen on for incoming dns traffic "
+		"(default ::)\n"
+		"  -p port to listen on for incoming dns traffic (default 53)\n"
+		"  -n ip to respond with to NS queries\n"
+		"     (Use 'auto' to use the external IP, looked up via a service)\n"
+		"  -b port to forward normal DNS queries to (on localhost)\n"
+		"  -P password used for authentication (max 32 chars will be used)\n"
+		"  -F pidfile to write pid to a file\n"
+		"  -i maximum idle time before shutting down\n\n"
+		"tunnel_ip is the IP number of the local tunnel interface.\n"
+		"   /netmask sets the size of the tunnel network.\n"
+		"topdomain is the FQDN that is delegated to this server.\n"
+		"   Initial wildcard is allowed (example: *.tun.com)\n");
 
-	fprintf(stderr, "iodine IP over DNS tunneling server\n");
-	fprintf(stderr, "Usage: %s [-v] [-h] [-c] [-s] [-f] [-D] [-u user] "
-		"[-t chrootdir] [-d device] [-m mtu] [-z context] "
-		"[-l ip address to listen on] [-p port] [-n external ip] [-b dnsport] [-P password] "
-		"[-F pidfile] tunnel_ip[/netmask] topdomain\n", __progname);
-	fprintf(stderr, "  -v to print version info and exit\n");
-	fprintf(stderr, "  -h to print this help and exit\n");
-	fprintf(stderr, "  -c to disable check of client IP/port on each request\n");
-	fprintf(stderr, "  -s to skip creating and configuring the tun device, "
-		"which then has to be created manually\n");
-	fprintf(stderr, "  -f to keep running in foreground\n");
-	fprintf(stderr, "  -D to increase debug level\n");
-	fprintf(stderr, "     (using -DD in UTF-8 terminal: \"LC_ALL=C luit iodined -DD ...\")\n");
-	fprintf(stderr, "  -u name to drop privileges and run as user 'name'\n");
-	fprintf(stderr, "  -t dir to chroot to directory dir\n");
-	fprintf(stderr, "  -d device to set tunnel device name\n");
-	fprintf(stderr, "  -m mtu to set tunnel device mtu\n");
-	fprintf(stderr, "  -z context to apply SELinux context after initialization\n");
-	fprintf(stderr, "  -l ip address to listen on for incoming dns traffic "
-		"(default 0.0.0.0)\n");
-	fprintf(stderr, "  -p port to listen on for incoming dns traffic (default 53)\n");
-	fprintf(stderr, "  -n ip to respond with to NS queries\n");
-	fprintf(stderr, "  -b port to forward normal DNS queries to (on localhost)\n");
-	fprintf(stderr, "  -P password used for authentication (max 32 chars will be used)\n");
-	fprintf(stderr, "  -F pidfile to write pid to a file\n");
-	fprintf(stderr, "  -i maximum idle time before shutting down\n");
-	fprintf(stderr, "tunnel_ip is the IP number of the local tunnel interface.\n");
-	fprintf(stderr, "   /netmask sets the size of the tunnel network.\n");
-	fprintf(stderr, "topdomain is the FQDN that is delegated to this server.\n");
 	exit(0);
 }
 
-static void
-version() {
-	fprintf(stderr, "iodine IP over DNS tunneling server\n");
-	fprintf(stderr, "version: 0.7.0 from 2014-06-16\n");
+static void version(void)
+{
+	fprintf(stderr,
+		"iodine IP over DNS tunneling server\n"
+		"Git version: %s\n", GITREVISION);
+
 	exit(0);
+}
+
+static void prepare_dns_fd(int fd)
+{
+#ifndef WINDOWS32
+	int flag = 1;
+
+	/* To get destination address from each UDP datagram, see read_dns() */
+	setsockopt(fd, IPPROTO_IP, DSTADDR_SOCKOPT, (const void*) &flag, sizeof(flag));
+#ifdef IPV6_RECVPKTINFO
+	setsockopt(fd, IPPROTO_IPV6, IPV6_RECVPKTINFO, (const void*) &flag, sizeof(flag));
+#endif
+#ifdef IPV6_PKTINFO
+	setsockopt(fd, IPPROTO_IPV6, IPV6_PKTINFO, (const void*) &flag, sizeof(flag));
+#endif
+
+#endif
 }
 
 int
 main(int argc, char **argv)
 {
-	extern char *__progname;
-	char *listen_ip;
+	char *listen_ip4;
+	char *listen_ip6;
 	char *errormsg;
 #ifndef WINDOWS32
 	struct passwd *pw;
@@ -2267,7 +2369,8 @@ main(int argc, char **argv)
 	char *context;
 	char *device;
 	char *pidfile;
-	int dnsd_fd;
+	int addrfamily;
+	struct dnsfd dns_fds;
 	int tun_fd;
 
 	/* settings for forwarding normal DNS to
@@ -2283,8 +2386,10 @@ main(int argc, char **argv)
 	int ns_get_externalip;
 	int retval;
 	int max_idle_time = 0;
-	struct sockaddr_storage dnsaddr;
-	int dnsaddr_len;
+	struct sockaddr_storage dns4addr;
+	int dns4addr_len;
+	struct sockaddr_storage dns6addr;
+	int dns6addr_len;
 #ifdef HAVE_SYSTEMD
 	int nb_fds;
 #endif
@@ -2302,20 +2407,17 @@ main(int argc, char **argv)
 	bind_fd = 0;
 	mtu = 1130;	/* Very many relays give fragsize 1150 or slightly
 			   higher for NULL; tun/zlib adds ~17 bytes. */
-	listen_ip = NULL;
+	listen_ip4 = NULL;
+	listen_ip6 = NULL;
 	port = 53;
 	ns_ip = INADDR_ANY;
 	ns_get_externalip = 0;
+	addrfamily = AF_UNSPEC;
 	check_ip = 1;
 	skipipconfig = 0;
 	debug = 0;
 	netmask = 27;
 	pidfile = NULL;
-
-	b32 = get_base32_encoder();
-	b64 = get_base64_encoder();
-	b64u = get_base64u_encoder();
-	b128 = get_base128_encoder();
 
 	retval = 0;
 
@@ -2331,12 +2433,17 @@ main(int argc, char **argv)
 		__progname++;
 #endif
 
-	memset(password, 0, sizeof(password));
 	srand(time(NULL));
 	fw_query_init();
 
-	while ((choice = getopt(argc, argv, "vcsfhDu:t:d:m:l:p:n:b:P:z:F:i:")) != -1) {
+	while ((choice = getopt(argc, argv, "46vcsfhDu:t:d:m:l:L:p:n:b:P:z:F:i:")) != -1) {
 		switch(choice) {
+		case '4':
+			addrfamily = AF_INET;
+			break;
+		case '6':
+			addrfamily = AF_INET6;
+			break;
 		case 'v':
 			version();
 			break;
@@ -2350,7 +2457,7 @@ main(int argc, char **argv)
 			foreground = 1;
 			break;
 		case 'h':
-			help();
+			help(stdout);
 			break;
 		case 'D':
 			debug++;
@@ -2368,7 +2475,10 @@ main(int argc, char **argv)
 			mtu = atoi(optarg);
 			break;
 		case 'l':
-			listen_ip = optarg;
+			listen_ip4 = optarg;
+			break;
+		case 'L':
+			listen_ip6 = optarg;
 			break;
 		case 'p':
 			port = atoi(optarg);
@@ -2409,7 +2519,7 @@ main(int argc, char **argv)
 	argc -= optind;
 	argv += optind;
 
-	check_superuser(usage);
+	check_superuser();
 
 	if (argc != 2)
 		usage();
@@ -2429,7 +2539,7 @@ main(int argc, char **argv)
 	}
 
 	topdomain = strdup(argv[1]);
-	if(check_topdomain(topdomain, &errormsg)) {
+	if (check_topdomain(topdomain, 1, &errormsg)) {
 		warnx("Invalid topdomain: %s", errormsg);
 		usage();
 		/* NOTREACHED */
@@ -2449,7 +2559,7 @@ main(int argc, char **argv)
 		usage();
 	}
 
-	if(port < 1 || port > 65535) {
+	if (port < 1 || port > 65535) {
 		warnx("Bad port number given.");
 		usage();
 	}
@@ -2464,15 +2574,51 @@ main(int argc, char **argv)
 		fprintf(stderr, "Add more -D switches to set higher debug level.\n");
 		foreground = 1;
 	}
-
-	dnsaddr_len = get_addr(listen_ip, port, AF_INET, AI_PASSIVE | AI_NUMERICHOST, &dnsaddr);
-	if (dnsaddr_len < 0) {
-		warnx("Bad IP address to listen on.");
-		usage();
+	if (addrfamily == AF_UNSPEC || addrfamily == AF_INET) {
+		if (listen_ip4 && strcmp("external", listen_ip4) == 0) {
+			struct in_addr extip;
+			int res = get_external_ip(&extip);
+			if (res) {
+				fprintf(stderr, "Failed to get external IP via DNS query.\n");
+				exit(3);
+			}
+			listen_ip4 = inet_ntoa(extip);
+			fprintf(stderr, "Will listen on external IP %s\n", listen_ip4);
+		}
+		dns4addr_len = get_addr(listen_ip4, port, AF_INET, AI_PASSIVE, &dns4addr);
+		if (dns4addr_len < 0) {
+			warnx("Bad IPv4 address to listen on: '%s'", listen_ip4);
+			usage();
+		}
+		// Use dns4addr from here on.
+		listen_ip4 = NULL;
+	}
+	if (addrfamily == AF_UNSPEC || addrfamily == AF_INET6) {
+		int addr6_res = get_addr(listen_ip6, port, AF_INET6, AI_PASSIVE, &dns6addr);
+		if (addr6_res < 0) {
+			if (listen_ip6 == NULL) {
+				if (addrfamily == AF_INET6) {
+					fprintf(stderr, "IPv6 not supported");
+					exit(3);
+				} else {
+					warnx("IPv6 not supported, skipping");
+					addrfamily = AF_INET;
+				}
+			} else {
+				warnx("Failed to get IPv6 address to listen on: '%s': %s",
+					listen_ip6, gai_strerror(addr6_res));
+				usage();
+				/* NOTREACHED */
+			}
+		} else {
+			dns6addr_len = addr6_res;
+		}
+		// Use dns6addr from here on.
+		listen_ip6 = NULL;
 	}
 
-	if(bind_enable) {
-		in_addr_t dns_ip = ((struct sockaddr_in *) &dnsaddr)->sin_addr.s_addr;
+	if (bind_enable) {
+		in_addr_t dns_ip = ((struct sockaddr_in *) &dns4addr)->sin_addr.s_addr;
 		if (bind_port < 1 || bind_port > 65535) {
 			warnx("Bad DNS server port number given.");
 			usage();
@@ -2493,7 +2639,7 @@ main(int argc, char **argv)
 		struct in_addr extip;
 		int res = get_external_ip(&extip);
 		if (res) {
-			fprintf(stderr, "Failed to get external IP via web service.\n");
+			fprintf(stderr, "Failed to get external IP via DNS query.\n");
 			exit(3);
 		}
 		ns_ip = extip.s_addr;
@@ -2516,42 +2662,80 @@ main(int argc, char **argv)
 			read_password(password, sizeof(password));
 	}
 
+	/* Mark both file descriptors as unused */
+	dns_fds.v4fd = -1;
+	dns_fds.v6fd = -1;
+
 	created_users = init_users(my_ip, netmask);
 
 	if ((tun_fd = open_tun(device)) == -1) {
-		retval = 1;
-		goto cleanup0;
+		/* nothing to clean up, just return */
+		return 1;
 	}
 	if (!skipipconfig) {
 		const char *other_ip = users_get_first_ip();
 		if (tun_setip(argv[0], other_ip, netmask) != 0 || tun_setmtu(mtu) != 0) {
 			retval = 1;
 			free((void*) other_ip);
-			goto cleanup1;
+			goto cleanup;
 		}
 		free((void*) other_ip);
 	}
+
 #ifdef HAVE_SYSTEMD
 	nb_fds = sd_listen_fds(0);
-	if (nb_fds > 1) {
+	if (nb_fds < 0) {
+		warnx("Failed to receive file descriptors from systemd: %s", strerror(-nb_fds));
 		retval = 1;
-		warnx("Too many file descriptors received!\n");
-		goto cleanup1;
-	} else if (nb_fds == 1) {
-		dnsd_fd = SD_LISTEN_FDS_START;
-	} else {
+		goto cleanup;
+	} else if (nb_fds == 0) {
 #endif
-		if ((dnsd_fd = open_dns(&dnsaddr, dnsaddr_len)) < 0) {
+		if ((addrfamily == AF_UNSPEC || addrfamily == AF_INET) &&
+			(dns_fds.v4fd = open_dns(&dns4addr, dns4addr_len)) < 0) {
+
 			retval = 1;
-			goto cleanup2;
+			goto cleanup;
+		}
+		if ((addrfamily == AF_UNSPEC || addrfamily == AF_INET6) &&
+			/* Set IPv6 socket to V6ONLY */
+			(dns_fds.v6fd = open_dns_opt(&dns6addr, dns6addr_len, 1)) < 0) {
+
+			retval = 1;
+			goto cleanup;
 		}
 #ifdef HAVE_SYSTEMD
+	} else if (nb_fds <= 2) {
+		/* systemd may pass up to two sockets, for ip4 and ip6, try to figure out
+			which is which */
+		for (int i = 0; i < nb_fds; i++) {
+			int fd = SD_LISTEN_FDS_START + i;
+			if (sd_is_socket(fd, AF_INET, SOCK_DGRAM, -1)) {
+				dns_fds.v4fd = fd;
+			} else if (sd_is_socket(fd, AF_INET6, SOCK_DGRAM, -1)) {
+				dns_fds.v6fd = fd;
+			} else {
+				retval = 1;
+				warnx("Unknown socket %d passed to iodined!\n", fd);
+				goto cleanup;
+			}
+		}
+	} else {
+		retval = 1;
+		warnx("Too many file descriptors received!\n");
+		goto cleanup;
 	}
 #endif
+
+	/* Setup dns file descriptors to get destination IP address */
+	if (dns_fds.v4fd >= 0)
+		prepare_dns_fd(dns_fds.v4fd);
+	if (dns_fds.v6fd >= 0)
+		prepare_dns_fd(dns_fds.v6fd);
+
 	if (bind_enable) {
 		if ((bind_fd = open_dns_from_host(NULL, 0, AF_INET, 0)) < 0) {
 			retval = 1;
-			goto cleanup3;
+			goto cleanup;
 		}
 	}
 
@@ -2570,10 +2754,10 @@ main(int argc, char **argv)
 		do_pidfile(pidfile);
 
 #ifdef FREEBSD
-	tzsetwall();
+	tzset();
 #endif
 #ifndef WINDOWS32
-	openlog( __progname, LOG_NDELAY, LOG_DAEMON );
+	openlog(__progname, LOG_NDELAY, LOG_DAEMON);
 #endif
 
 	if (newroot != NULL)
@@ -2596,16 +2780,16 @@ main(int argc, char **argv)
 
 	syslog(LOG_INFO, "started, listening on port %d", port);
 
-	tunnel(tun_fd, dnsd_fd, bind_fd, max_idle_time);
+	tunnel(tun_fd, &dns_fds, bind_fd, max_idle_time);
 
 	syslog(LOG_INFO, "stopping");
-cleanup3:
 	close_dns(bind_fd);
-cleanup2:
-	close_dns(dnsd_fd);
-cleanup1:
+cleanup:
+	if (dns_fds.v6fd >= 0)
+		close_dns(dns_fds.v6fd);
+	if (dns_fds.v4fd >= 0)
+		close_dns(dns_fds.v4fd);
 	close_tun(tun_fd);
-cleanup0:
 
 	return retval;
 }

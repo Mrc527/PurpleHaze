@@ -1,5 +1,7 @@
 #!/bin/sh
 
+: "${PKG_CONFIG:=pkg-config}"
+
 case $2 in
 link)
 
@@ -11,15 +13,16 @@ link)
 			echo '-lsocket -lbind -lbsd';
 		;;
 		Haiku)
-			echo '-lnetwork';
+			echo '-lnetwork -lbsd';
 		;;
 		windows32)
 			echo '-lws2_32 -liphlpapi';
 		;;
 		Linux)
 			FLAGS="";
-			[ -e /usr/include/selinux/selinux.h ] && FLAGS="$FLAGS -lselinux";
-			[ -e /usr/include/systemd/sd-daemon.h ] && FLAGS="$FLAGS -lsystemd-daemon";
+			"$PKG_CONFIG" --exists libselinux && FLAGS="$FLAGS $($PKG_CONFIG --libs libselinux)";
+			"$PKG_CONFIG" --exists libsystemd-daemon && FLAGS="$FLAGS $($PKG_CONFIG --libs libsystemd-daemon)";
+			"$PKG_CONFIG" --exists libsystemd && FLAGS="$FLAGS $($PKG_CONFIG --libs libsystemd)";
 			echo $FLAGS;
 		;;
 	esac
@@ -32,11 +35,21 @@ cflags)
 		BeOS)
 			echo '-Dsocklen_t=int';
 		;;
+		Haiku)
+			echo '-D_DEFAULT_SOURCE';
+		;;
+		Darwin)
+			echo '-D__APPLE_USE_RFC_3542';
+		;;
 		Linux)
 			FLAGS="-D_GNU_SOURCE"
-			[ -e /usr/include/selinux/selinux.h ] && FLAGS="$FLAGS -DHAVE_SETCON";
-			[ -e /usr/include/systemd/sd-daemon.h ] && FLAGS="$FLAGS -DHAVE_SYSTEMD";
+			"$PKG_CONFIG" --exists libselinux && FLAGS="$FLAGS -DHAVE_SETCON";
+			"$PKG_CONFIG" --exists libsystemd-daemon && FLAGS="$FLAGS -DHAVE_SYSTEMD";
+			"$PKG_CONFIG" --exists libsystemd && FLAGS="$FLAGS -DHAVE_SYSTEMD";
 			echo $FLAGS;
+		;;
+		GNU/kFreeBSD|GNU)
+			echo '-D_GNU_SOURCE'
 		;;
 	esac
 ;;

@@ -1,8 +1,9 @@
 /*
  * Copyright (c) 2006-2014 Erik Ekman <yarrick@kryo.se>,
  * 2006-2009 Bjorn Andersson <flex@kryo.se>
+ * 2013 Peter Sagerson <psagers.github@ignorare.net>
  *
- * Permission to use, copy, modify, and distribute this software for any
+ * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
  * copyright notice and this permission notice appear in all copies.
  *
@@ -25,8 +26,23 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 
+#ifdef DARWIN
+#include <ctype.h>
+#include <sys/kern_control.h>
+#include <sys/sys_domain.h>
+#include <sys/ioctl.h>
+/* Inline used parts of if_utun.h to compile without it. */
+#define UTUN_CONTROL_NAME "com.apple.net.utun_control"
+#define UTUN_OPT_IFNAME 2
+#include <netinet/ip.h>
+#endif
+
 #ifndef IFCONFIGPATH
 #define IFCONFIGPATH "PATH=/sbin:/bin "
+#endif
+
+#ifndef ROUTEPATH
+#define ROUTEPATH "PATH=/sbin:/bin "
 #endif
 
 #ifdef WINDOWS32
@@ -47,6 +63,7 @@ static void get_name(char *ifname, int namelen, char *dev_name);
 #define TAP_DEVICE_SPACE "\\\\.\\Global\\"
 #define TAP_VERSION_ID_0801 "tap0801"
 #define TAP_VERSION_ID_0901 "tap0901"
+#define TAP_VERSION_ID_0901_ROOT "root\\tap0901"
 #define KEY_COMPONENT_ID "ComponentId"
 #define NET_CFG_INST_ID "NetCfgInstanceId"
 #else
@@ -59,11 +76,6 @@ static void get_name(char *ifname, int namelen, char *dev_name);
 
 #include "tun.h"
 #include "common.h"
-
-#ifdef __ANDROID__
-struct _tun_config_android tun_config_android;
-#endif /* __ANDROID__ */
-
 
 static char if_name[250];
 
@@ -86,7 +98,7 @@ open_tun(const char *tun_device)
 #endif
 
 	if ((tun_fd = open(tunnel, O_RDWR)) < 0) {
-		warn("open_tun: %s: %s", tunnel, strerror(errno));
+		warn("open_tun: %s", tunnel);
 		return -1;
 	}
 
@@ -107,7 +119,7 @@ open_tun(const char *tun_device)
 		}
 
 		if (errno != EBUSY) {
-			warn("open_tun: ioctl[TUNSETIFF]: %s", strerror(errno));
+			warn("open_tun: ioctl[TUNSETIFF]");
 			return -1;
 		}
 	} else {
@@ -122,7 +134,7 @@ open_tun(const char *tun_device)
 			}
 
 			if (errno != EBUSY) {
-				warn("open_tun: ioctl[TUNSETIFF]: %s", strerror(errno));
+				warn("open_tun: ioctl[TUNSETIFF]");
 				return -1;
 			}
 		}
@@ -146,7 +158,7 @@ get_device(char *device, int device_len, const char *wanted_dev)
 	status = RegOpenKeyEx(HKEY_LOCAL_MACHINE, TAP_ADAPTER_KEY, 0, KEY_READ, &adapter_key);
 
 	if (status != ERROR_SUCCESS) {
-		warnx("Error opening registry key " TAP_ADAPTER_KEY );
+		warnx("Error opening registry key " TAP_ADAPTER_KEY);
 		return;
 	}
 
@@ -166,7 +178,7 @@ get_device(char *device, int device_len, const char *wanted_dev)
 		if (status == ERROR_NO_MORE_ITEMS) {
 			break;
 		} else if (status != ERROR_SUCCESS) {
-			warnx("Error enumerating subkeys of registry key " TAP_ADAPTER_KEY );
+			warnx("Error enumerating subkeys of registry key " TAP_ADAPTER_KEY);
 			break;
 		}
 
@@ -184,7 +196,8 @@ get_device(char *device, int device_len, const char *wanted_dev)
 			goto next;
 		}
 		if (strncmp(TAP_VERSION_ID_0801, component, strlen(TAP_VERSION_ID_0801)) == 0 ||
-			strncmp(TAP_VERSION_ID_0901, component, strlen(TAP_VERSION_ID_0901)) == 0) {
+			strncmp(TAP_VERSION_ID_0901, component, strlen(TAP_VERSION_ID_0901)) == 0 ||
+			strncmp(TAP_VERSION_ID_0901_ROOT, component, strlen(TAP_VERSION_ID_0901_ROOT)) == 0) {
 			/* We found a TAP32 device, get its NetCfgInstanceId */
 			char iid_string[256] = NET_CFG_INST_ID;
 
@@ -320,6 +333,95 @@ open_tun(const char *tun_device)
 
 #else /* BSD and friends */
 
+#ifdef DARWIN
+
+/* Extract the device number from the name, if given. The value returned will
+ * be suitable for sockaddr_ctl.sc_unit, which means 0 for auto-assign, or
+ * (n + 1) for manual.
+ */
+static int
+utun_unit(const char *dev)
+{
+	const char *unit_str = dev;
+	int unit = 0;
+
+	if (!dev)
+		return -1;
+
+	while (*unit_str != '\0' && !isdigit(*unit_str))
+		unit_str++;
+
+	if (isdigit(*unit_str))
+		unit = strtol(unit_str, NULL, 10) + 1;
+
+	return unit;
+}
+
+static int
+open_utun(const char *dev)
+{
+	struct sockaddr_ctl addr;
+	struct ctl_info info;
+	char ifname[10];
+	socklen_t ifname_len = sizeof(ifname);
+	int unit;
+	int fd = -1;
+	int err = 0;
+
+	fd = socket(PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL);
+	if (fd < 0) {
+		warn("open_utun: socket(PF_SYSTEM)");
+		return -1;
+	}
+
+	/* Look up the kernel controller ID for utun devices. */
+	bzero(&info, sizeof(info));
+	strncpy(info.ctl_name, UTUN_CONTROL_NAME, MAX_KCTL_NAME);
+
+	err = ioctl(fd, CTLIOCGINFO, &info);
+	if (err != 0) {
+		warn("open_utun: ioctl(CTLIOCGINFO)");
+		close(fd);
+		return -1;
+	}
+
+	/* Connecting to the socket creates the utun device. */
+	addr.sc_len = sizeof(addr);
+	addr.sc_family = AF_SYSTEM;
+	addr.ss_sysaddr = AF_SYS_CONTROL;
+	addr.sc_id = info.ctl_id;
+	unit = utun_unit(dev);
+	if (unit < 0) {
+		close(fd);
+		return -1;
+	}
+	addr.sc_unit = unit;
+
+	err = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
+	if (err != 0) {
+		warn("open_utun: connect");
+		close(fd);
+		return -1;
+	}
+
+	/* Retrieve the assigned interface name. */
+	err = getsockopt(fd, SYSPROTO_CONTROL, UTUN_OPT_IFNAME, ifname, &ifname_len);
+	if (err != 0) {
+		warn("open_utun: getsockopt(UTUN_OPT_IFNAME)");
+		close(fd);
+		return -1;
+	}
+
+	strncpy(if_name, ifname, sizeof(if_name));
+
+	fprintf(stderr, "Opened %s\n", ifname);
+	fd_set_close_on_exec(fd);
+
+	return fd;
+}
+
+#endif
+
 int
 open_tun(const char *tun_device)
 {
@@ -328,12 +430,21 @@ open_tun(const char *tun_device)
 	char tun_name[50];
 
 	if (tun_device != NULL) {
+#ifdef DARWIN
+		if (!strncmp(tun_device, "utun", 4)) {
+			tun_fd = open_utun(tun_device);
+			if (tun_fd >= 0) {
+				return tun_fd;
+			}
+		}
+#endif
+
 		snprintf(tun_name, sizeof(tun_name), "/dev/%s", tun_device);
 		strncpy(if_name, tun_device, sizeof(if_name));
 		if_name[sizeof(if_name)-1] = '\0';
 
 		if ((tun_fd = open(tun_name, O_RDWR)) < 0) {
-			warn("open_tun: %s: %s", tun_name, strerror(errno));
+			warn("open_tun: %s", tun_name);
 			return -1;
 		}
 
@@ -354,6 +465,17 @@ open_tun(const char *tun_device)
 			if (errno == ENOENT)
 				break;
 		}
+
+#ifdef DARWIN
+		fprintf(stderr, "No tun devices found, trying utun\n");
+		for (i = 0; i < TUN_MAX_TRY; i++) {
+			snprintf(tun_name, sizeof(tun_name), "utun%d", i);
+			tun_fd = open_utun(tun_name);
+			if (tun_fd >= 0) {
+				return tun_fd;
+			}
+		}
+#endif
 
 		warn("open_tun: Failed to open tunneling device");
 	}
@@ -409,25 +531,43 @@ read_tun(int tun_fd, char *buf, size_t len)
 	}
 }
 #else
+static int
+tun_uses_header(void)
+{
+#if defined (FREEBSD) || defined (NETBSD)
+	/* FreeBSD/NetBSD has no header */
+	return 0;
+#elif defined (DARWIN)
+	/* Darwin tun has no header, Darwin utun does */
+	return !strncmp(if_name, "utun", 4);
+#else  /* LINUX/OPENBSD */
+	return 1;
+#endif
+}
+
 int
 write_tun(int tun_fd, char *data, size_t len)
 {
-#if defined (FREEBSD) || defined (DARWIN) || defined(NETBSD) || defined(__ANDROID__)
-	data += 4;
-	len -= 4;
-#else /* !FREEBSD/DARWIN */
+	if (!tun_uses_header()) {
+		data += 4;
+		len -= 4;
+	} else {
 #ifdef LINUX
-	data[0] = 0x00;
-	data[1] = 0x00;
-	data[2] = 0x08;
-	data[3] = 0x00;
-#else /* OPENBSD */
-	data[0] = 0x00;
-	data[1] = 0x00;
-	data[2] = 0x00;
-	data[3] = 0x02;
-#endif /* !LINUX */
-#endif /* FREEBSD */
+		// Linux prefixes with 32 bits ethertype
+		// 0x0800 for IPv4, 0x86DD for IPv6
+		data[0] = 0x00;
+		data[1] = 0x00;
+		data[2] = 0x08;
+		data[3] = 0x00;
+#else /* OPENBSD and DARWIN(utun) */
+		// BSDs prefix with 32 bits address family
+		// AF_INET for IPv4, AF_INET6 for IPv6
+		data[0] = 0x00;
+		data[1] = 0x00;
+		data[2] = 0x00;
+		data[3] = 0x02;
+#endif
+	}
 
 	if (write(tun_fd, data, len) != len) {
 		warn("write_tun");
@@ -439,20 +579,19 @@ write_tun(int tun_fd, char *data, size_t len)
 ssize_t
 read_tun(int tun_fd, char *buf, size_t len)
 {
-#if defined (FREEBSD) || defined (DARWIN) || defined(NETBSD) || defined(__ANDROID__)
-	/* FreeBSD/Darwin/NetBSD/Android-SDK has no header */
-	int bytes;
-	memset(buf, 0, 4);
+	if (!tun_uses_header()) {
+		int bytes;
+		memset(buf, 0, 4);
 
-	bytes = read(tun_fd, buf + 4, len - 4);
-	if (bytes < 0) {
-		return bytes;
+		bytes = read(tun_fd, buf + 4, len - 4);
+		if (bytes < 0) {
+			return bytes;
+		} else {
+			return bytes + 4;
+		}
 	} else {
-		return bytes + 4;
+		return read(tun_fd, buf, len);
 	}
-#else /* !FREEBSD */
-	return read(tun_fd, buf, len);
-#endif /* !FREEBSD */
 }
 #endif
 
@@ -489,18 +628,7 @@ tun_setip(const char *ip, const char *other_ip, int netbits)
 		fprintf(stderr, "Invalid IP: %s!\n", ip);
 		return 1;
 	}
-#if defined(__ANDROID__)
-	if (tun_config_android.ip) {
-		free(tun_config_android.ip);
-	}
-	if (tun_config_android.remoteip) {
-		free(tun_config_android.remoteip);
-	}
-	tun_config_android.ip = strdup(ip);
-	tun_config_android.remoteip = strdup(other_ip);
-	tun_config_android.netbits = netbits;
-	return 0;
-#elif !defined(WINDOWS32)
+#ifndef WINDOWS32
 # ifdef FREEBSD
 	display_ip = other_ip; /* FreeBSD wants other IP as second IP */
 # else
@@ -518,12 +646,12 @@ tun_setip(const char *ip, const char *other_ip, int netbits)
 	netip.s_addr = inet_addr(ip);
 	netip.s_addr = netip.s_addr & net.s_addr;
 	r = system(cmdline);
-	if(r != 0) {
+	if (r != 0) {
 		return r;
 	} else {
 
 		snprintf(cmdline, sizeof(cmdline),
-				"/sbin/route add %s/%d %s",
+				ROUTEPATH "route add %s/%d %s",
 				inet_ntoa(netip), netbits, ip);
 	}
 	fprintf(stderr, "Adding route %s/%d to %s\n", inet_ntoa(netip), netbits, ip);
@@ -568,10 +696,7 @@ tun_setip(const char *ip, const char *other_ip, int netbits)
 int
 tun_setmtu(const unsigned mtu)
 {
-#ifdef __ANDROID__
-	tun_config_android.mtu = mtu;
-	return 0;
-#elif !defined(WINDOWS32)
+#ifndef WINDOWS32
 	char cmdline[512];
 
 	if (mtu > 200 && mtu <= 1500) {

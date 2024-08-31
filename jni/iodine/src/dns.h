@@ -2,7 +2,7 @@
  * Copyright (c) 2006-2014 Erik Ekman <yarrick@kryo.se>,
  * 2006-2009 Bjorn Andersson <flex@kryo.se>
  *
- * Permission to use, copy, modify, and distribute this software for any
+ * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
  * copyright notice and this permission notice appear in all copies.
  *
@@ -27,8 +27,9 @@ typedef enum {
 
 extern int dnsc_use_edns0;
 
-int dns_encode(char *, size_t, struct query *, qr_t, char *, size_t);
-int dns_encode_ns_response(char *buf, size_t buflen, struct query *q, char *topdomain);
+int dns_encode(char *, size_t, struct query *, qr_t, const char *, size_t);
+int dns_encode_ns_response(char *buf, size_t buflen, struct query *q,
+			   char *topdomain);
 int dns_encode_a_response(char *buf, size_t buflen, struct query *q);
 unsigned short dns_get_id(char *packet, size_t packetlen);
 int dns_decode(char *, size_t, struct query *, qr_t, char *, size_t);

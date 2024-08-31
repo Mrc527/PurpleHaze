@@ -2,7 +2,7 @@
  * Copyright (c) 2006-2014 Erik Ekman <yarrick@kryo.se>,
  * 2006-2009 Bjorn Andersson <flex@kryo.se>
  *
- * Permission to use, copy, modify, and distribute this software for any
+ * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
  * copyright notice and this permission notice appear in all copies.
  *
@@ -18,15 +18,15 @@
 #ifndef __TEST_H__
 #define __TEST_H__
 
-TCase *test_base32_create_tests();
-TCase *test_base64_create_tests();
-TCase *test_common_create_tests();
-TCase *test_dns_create_tests();
-TCase *test_encoding_create_tests();
-TCase *test_read_create_tests();
-TCase *test_login_create_tests();
-TCase *test_user_create_tests();
-TCase *test_fw_query_create_tests();
+TCase *test_base32_create_tests(void);
+TCase *test_base64_create_tests(void);
+TCase *test_common_create_tests(void);
+TCase *test_dns_create_tests(void);
+TCase *test_encoding_create_tests(void);
+TCase *test_read_create_tests(void);
+TCase *test_login_create_tests(void);
+TCase *test_user_create_tests(void);
+TCase *test_fw_query_create_tests(void);
 
 char *va_str(const char *, ...);
 
