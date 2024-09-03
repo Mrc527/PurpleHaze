@@ -1,7 +1,7 @@
 /*
  * Copyright (C) 2009 J.A.Bezemer@opensourcepartners.nl
  *
- * Permission to use, copy, modify, and distribute this software for any
+ * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
  * copyright notice and this permission notice appear in all copies.
  *
@@ -33,10 +33,9 @@
 #include <string.h>
 
 #include "encoding.h"
-#include "base128.h"
 
-#define BLKSIZE_RAW 7
-#define BLKSIZE_ENC 8
+#define BASE128_BLKSIZE_RAW 7
+#define BASE128_BLKSIZE_ENC 8
 
 /* Don't use '-' (restricted to middle of labels), prefer iso_8859-1
  * accent chars since they might readily be entered in normal use,
@@ -52,55 +51,13 @@ static const unsigned char cb128[] =
 static unsigned char rev128[256];
 static int reverse_init = 0;
 
-static int base128_encode(char *, size_t *, const void *, size_t);
-static int base128_decode(void *, size_t *, const char *, size_t);
-static int base128_handles_dots();
-static int base128_blksize_raw();
-static int base128_blksize_enc();
-
-static struct encoder base128_encoder =
-{
-	"Base128",
-	base128_encode,
-	base128_decode,
-	base128_handles_dots,
-	base128_handles_dots,
-	base128_blksize_raw,
-	base128_blksize_enc
-};
-
-struct encoder
-*get_base128_encoder()
-{
-	return &base128_encoder;
-}
-
-static int
-base128_handles_dots()
-{
-	return 0;
-}
-
-static int
-base128_blksize_raw()
-{
-	return BLKSIZE_RAW;
-}
-
-static int
-base128_blksize_enc()
-{
-	return BLKSIZE_ENC;
-}
-
-inline static void
-base128_reverse_init()
+inline static void base128_reverse_init(void)
 {
 	int i;
 	unsigned char c;
 
 	if (!reverse_init) {
-		memset (rev128, 0, 256);
+		memset(rev128, 0, 256);
 		for (i = 0; i < 128; i++) {
 			c = cb128[i];
 			rev128[(int) c] = i;
@@ -109,8 +66,6 @@ base128_reverse_init()
 	}
 }
 
-static int
-base128_encode(char *buf, size_t *buflen, const void *data, size_t size)
 /*
  * Fills *buf with max. *buflen characters, encoding size bytes of *data.
  *
@@ -120,6 +75,8 @@ base128_encode(char *buf, size_t *buflen, const void *data, size_t size)
  * return value    : #bytes filled in buf   (excluding \0)
  * sets *buflen to : #bytes encoded from data
  */
+static int base128_encode(char *buf, size_t *buflen, const void *data,
+			  size_t size)
 {
 	unsigned char *ubuf = (unsigned char *) buf;
 	unsigned char *udata = (unsigned char *) data;
@@ -203,8 +160,6 @@ base128_encode(char *buf, size_t *buflen, const void *data, size_t size)
 
 #define REV128(x) rev128[(int) (x)]
 
-static int
-base128_decode(void *buf, size_t *buflen, const char *str, size_t slen)
 /*
  * Fills *buf with max. *buflen bytes, decoded from slen chars in *str.
  * Decoding stops early when *str contains \0.
@@ -216,13 +171,15 @@ base128_decode(void *buf, size_t *buflen, const char *str, size_t slen)
  *
  * return value    : #bytes filled in buf   (excluding \0)
  */
+static int base128_decode(void *buf, size_t *buflen, const char *str,
+			  size_t slen)
 {
 	unsigned char *ustr = (unsigned char *) str;
 	unsigned char *ubuf = (unsigned char *) buf;
 	int iout = 0;	/* to-be-filled output byte */
 	int iin = 0;	/* next input char to use in decoding */
 
-	base128_reverse_init ();
+	base128_reverse_init();
 
 	/* Note: Don't bother to optimize manually. GCC optimizes
 	   better(!) when using simplistic array indexing. */
@@ -289,3 +246,16 @@ base128_decode(void *buf, size_t *buflen, const char *str, size_t slen)
 
 	return iout;
 }
+
+const struct encoder base128_ops = {
+	.name = "Base128",
+
+	.encode = base128_encode,
+	.decode = base128_decode,
+
+	.places_dots = false,
+	.eats_dots = false,
+
+	.blocksize_raw = BASE128_BLKSIZE_RAW,
+	.blocksize_encoded = BASE128_BLKSIZE_ENC,
+};

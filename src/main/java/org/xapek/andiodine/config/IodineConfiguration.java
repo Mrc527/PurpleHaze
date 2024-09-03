@@ -11,7 +11,7 @@ public class IodineConfiguration {
 	}
 
 	public static enum RequestType {
-		AUTODETECT, NULL, TXT, SRV, MX, CNAME, A;
+		AUTODETECT, NULL, PRIVATE, TXT, SRV, MX, CNAME, A;
 
 		public String getIodineName() {
 			if (this == AUTODETECT) {

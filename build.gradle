@@ -1,43 +1,41 @@
 buildscript {
     repositories {
-        jcenter()
+        mavenCentral()
+        google()
+        gradlePluginPortal()
     }
-
     dependencies {
-        classpath 'com.android.tools.build:gradle:2.3.3'
+        classpath 'com.android.tools.build:gradle:8.6.0'
     }
 }
 
+
 apply plugin: 'com.android.application'
 
-android {
-    compileSdkVersion 21
-    buildToolsVersion '25.0.3'
+repositories {
+    mavenCentral()
+    google()
+    gradlePluginPortal()
+}
 
+android {
     sourceSets.main {
         jniLibs.srcDir 'libs'
     }
 
-    productFlavors {
-        arm {
-            ndk {
-                abiFilters "armeabi"
-            }
-        }
-        x86 {
-            ndk {
-                abiFilters "x86"
-            }
-        }
-        fat {
-            ndk {
-                abiFilters "x86", "armeabi"
-            }
-        }
-    }
     externalNativeBuild {
         ndkBuild {
             path 'jni/Android.mk'
         }
+    }
+    ndkVersion '27.0.12077973'
+    defaultConfig {
+        applicationId 'org.xapek.andiodine'
+        namespace 'org.xapek.andiodine'
+        versionCode 7
+        versionName "1.7"
+        compileSdk 35
+        minSdkVersion 26
+        ndk.abiFilters 'armeabi-v7a','arm64-v8a','x86','x86_64'
     }
 }

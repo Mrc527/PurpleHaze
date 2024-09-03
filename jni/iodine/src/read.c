@@ -2,7 +2,7 @@
  * Copyright (c) 2006-2014 Erik Ekman <yarrick@kryo.se>,
  * 2006-2009 Bjorn Andersson <flex@kryo.se>
  *
- * Permission to use, copy, modify, and distribute this software for any
+ * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
  * copyright notice and this permission notice appear in all copies.
  *
@@ -18,6 +18,8 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdlib.h>
+
+#include "read.h"
 
 static int
 readname_loop(char *packet, int packetlen, char **src, char *dst, size_t length, size_t loop)
@@ -39,7 +41,7 @@ readname_loop(char *packet, int packetlen, char **src, char *dst, size_t length,
 		c = *s++;
 
 		/* is this a compressed label? */
-		if((c & 0xc0) == 0xc0) {
+		if ((c & 0xc0) == 0xc0) {
 			offset = (((s[-1] & 0x3f) << 8) | (s[0] & 0xff));
 			if (offset > packetlen) {
 				if (len == 0) {
@@ -228,7 +230,7 @@ putlong(char **dst, uint32_t value)
 }
 
 int
-putdata(char **dst, char *data, size_t len)
+putdata(char **dst, const char *data, size_t len)
 {
 	memcpy(*dst, data, len);
 
@@ -237,7 +239,7 @@ putdata(char **dst, char *data, size_t len)
 }
 
 int
-puttxtbin(char **buf, size_t bufremain, char *from, size_t fromremain)
+puttxtbin(char **buf, size_t bufremain, const char *from, size_t fromremain)
 {
 	unsigned char uc;
 	unsigned char *ucp = &uc;

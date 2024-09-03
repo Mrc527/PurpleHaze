@@ -3,7 +3,7 @@
  * 2006-2009 Bjorn Andersson <flex@kryo.se>
  * Mostly rewritten 2009 J.A.Bezemer@opensourcepartners.nl
  *
- * Permission to use, copy, modify, and distribute this software for any
+ * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
  * copyright notice and this permission notice appear in all copies.
  *
@@ -21,10 +21,9 @@
 #include <string.h>
 
 #include "encoding.h"
-#include "base64.h"
 
-#define BLKSIZE_RAW 3
-#define BLKSIZE_ENC 4
+#define BASE64_BLKSIZE_RAW 3
+#define BASE64_BLKSIZE_ENC 4
 
 /* Note: the "unofficial" char is last here, which means that the \377 pattern
    in DOWNCODECCHECK1 ('Y' request) will properly test it. */
@@ -33,55 +32,13 @@ static const char cb64[] =
 static unsigned char rev64[256];
 static int reverse_init = 0;
 
-static int base64_encode(char *, size_t *, const void *, size_t);
-static int base64_decode(void *, size_t *, const char *, size_t);
-static int base64_handles_dots();
-static int base64_blksize_raw();
-static int base64_blksize_enc();
-
-static struct encoder base64_encoder =
-{
-	"Base64",
-	base64_encode,
-	base64_decode,
-	base64_handles_dots,
-	base64_handles_dots,
-	base64_blksize_raw,
-	base64_blksize_enc
-};
-
-struct encoder
-*get_base64_encoder()
-{
-	return &base64_encoder;
-}
-
-static int
-base64_handles_dots()
-{
-	return 0;
-}
-
-static int
-base64_blksize_raw()
-{
-	return BLKSIZE_RAW;
-}
-
-static int
-base64_blksize_enc()
-{
-	return BLKSIZE_ENC;
-}
-
-inline static void
-base64_reverse_init()
+inline static void base64_reverse_init(void)
 {
 	int i;
 	unsigned char c;
 
 	if (!reverse_init) {
-		memset (rev64, 0, 256);
+		memset(rev64, 0, 256);
 		for (i = 0; i < 64; i++) {
 			c = cb64[i];
 			rev64[(int) c] = i;
@@ -90,8 +47,6 @@ base64_reverse_init()
 	}
 }
 
-static int
-base64_encode(char *buf, size_t *buflen, const void *data, size_t size)
 /*
  * Fills *buf with max. *buflen characters, encoding size bytes of *data.
  *
@@ -101,6 +56,8 @@ base64_encode(char *buf, size_t *buflen, const void *data, size_t size)
  * return value    : #bytes filled in buf   (excluding \0)
  * sets *buflen to : #bytes encoded from data
  */
+static int base64_encode(char *buf, size_t *buflen, const void *data,
+			 size_t size)
 {
 	unsigned char *udata = (unsigned char *) data;
 	int iout = 0;	/* to-be-filled output char */
@@ -128,7 +85,7 @@ base64_encode(char *buf, size_t *buflen, const void *data, size_t size)
 
 		if (iout >= *buflen || iin >= size)
 			break;
-		buf[iout] = cb64[((udata[iin] & 0x0f) << 2 ) |
+		buf[iout] = cb64[((udata[iin] & 0x0f) << 2) |
 				  ((iin + 1 < size) ?
 				   ((udata[iin + 1] & 0xc0) >> 6) : 0)];
 		iin++;			/* 1 complete, iin=2 */
@@ -151,8 +108,6 @@ base64_encode(char *buf, size_t *buflen, const void *data, size_t size)
 
 #define REV64(x) rev64[(int) (x)]
 
-static int
-base64_decode(void *buf, size_t *buflen, const char *str, size_t slen)
 /*
  * Fills *buf with max. *buflen bytes, decoded from slen chars in *str.
  * Decoding stops early when *str contains \0.
@@ -164,12 +119,14 @@ base64_decode(void *buf, size_t *buflen, const char *str, size_t slen)
  *
  * return value    : #bytes filled in buf   (excluding \0)
  */
+static int base64_decode(void *buf, size_t *buflen, const char *str,
+			 size_t slen)
 {
 	unsigned char *ubuf = (unsigned char *) buf;
 	int iout = 0;	/* to-be-filled output byte */
 	int iin = 0;	/* next input char to use in decoding */
 
-	base64_reverse_init ();
+	base64_reverse_init();
 
 	/* Note: Don't bother to optimize manually. GCC optimizes
 	   better(!) when using simplistic array indexing. */
@@ -204,3 +161,16 @@ base64_decode(void *buf, size_t *buflen, const char *str, size_t slen)
 
 	return iout;
 }
+
+const struct encoder base64_ops = {
+	.name = "Base64",
+
+	.encode = base64_encode,
+	.decode = base64_decode,
+
+	.places_dots = false,
+	.eats_dots = false,
+
+	.blocksize_raw = BASE64_BLKSIZE_RAW,
+	.blocksize_encoded = BASE64_BLKSIZE_ENC,
+};

@@ -2,7 +2,7 @@
  * Copyright (c) 2006-2014 Erik Ekman <yarrick@kryo.se>,
  * 2006-2009 Bjorn Andersson <flex@kryo.se>
  *
- * Permission to use, copy, modify, and distribute this software for any
+ * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
  * copyright notice and this permission notice appear in all copies.
  *
@@ -37,12 +37,11 @@
 struct tun_user *users;
 unsigned usercount;
 
-int
-init_users(in_addr_t my_ip, int netbits)
+int init_users(in_addr_t my_ip, int netbits)
 {
 	int i;
 	int skip = 0;
-	char newip[16];
+	char newip[32];
 
 	int maxusers;
 
@@ -77,6 +76,7 @@ init_users(in_addr_t my_ip, int netbits)
 		users[i].disabled = 0;
 		users[i].authenticated = 0;
 		users[i].authenticated_raw = 0;
+		users[i].options_locked = 0;
 		users[i].active = 0;
  		/* Rest is reset on login ('V' packet) */
 	}
@@ -84,34 +84,14 @@ init_users(in_addr_t my_ip, int netbits)
 	return usercount;
 }
 
-const char*
-users_get_first_ip()
+const char *users_get_first_ip(void)
 {
 	struct in_addr ip;
 	ip.s_addr = users[0].tun_ip;
 	return strdup(inet_ntoa(ip));
 }
 
-int
-users_waiting_on_reply()
-{
-	int ret;
-	int i;
-
-	ret = 0;
-	for (i = 0; i < usercount; i++) {
-		if (users[i].active && !users[i].disabled &&
-			users[i].last_pkt + 60 > time(NULL) &&
-			users[i].q.id != 0 && users[i].conn == CONN_DNS_NULL) {
-			ret++;
-		}
-	}
-
-	return ret;
-}
-
-int
-find_user_by_ip(uint32_t ip)
+int find_user_by_ip(uint32_t ip)
 {
 	int ret;
 	int i;
@@ -130,13 +110,12 @@ find_user_by_ip(uint32_t ip)
 	return ret;
 }
 
-int
-all_users_waiting_to_send()
 /* If this returns true, then reading from tun device is blocked.
    So only return true when all clients have at least one packet in
    the outpacket-queue, so that sending back-to-back is possible
    without going through another select loop.
 */
+int all_users_waiting_to_send(void)
 {
 	time_t now;
 	int ret;
@@ -163,8 +142,7 @@ all_users_waiting_to_send()
 	return ret;
 }
 
-int
-find_available_user()
+int find_available_user(void)
 {
 	int ret = -1;
 	int i;
@@ -174,6 +152,7 @@ find_available_user()
 			users[i].active = 1;
 			users[i].authenticated = 0;
 			users[i].authenticated_raw = 0;
+			users[i].options_locked = 0;
 			users[i].last_pkt = time(NULL);
 			users[i].fragsize = 4096;
 			users[i].conn = CONN_DNS_NULL;
@@ -184,8 +163,7 @@ find_available_user()
 	return ret;
 }
 
-void
-user_switch_codec(int userid, struct encoder *enc)
+void user_switch_codec(int userid, const struct encoder *enc)
 {
 	if (userid < 0 || userid >= usercount)
 		return;
@@ -193,13 +171,12 @@ user_switch_codec(int userid, struct encoder *enc)
 	users[userid].encoder = enc;
 }
 
-void
-user_set_conn_type(int userid, enum connection c)
+void user_set_conn_type(int userid, enum connection c)
 {
 	if (userid < 0 || userid >= usercount)
 		return;
 
-	if (c < 0 || c >= CONN_MAX)
+	if (c < CONN_RAW_UDP || c >= CONN_MAX)
 		return;
 
 	users[userid].conn = c;

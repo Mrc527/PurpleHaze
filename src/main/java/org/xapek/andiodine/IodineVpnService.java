@@ -160,10 +160,11 @@ public class IodineVpnService extends VpnService implements Runnable {
     }
 
     private void shutdown() {
-    	if (mConfiguration != null)
-    		setStatus(ACTION_STATUS_DISCONNECT, mConfiguration.getId(), null);
-    	else
-    		setStatus(ACTION_STATUS_IDLE, null, null);
+    	if (mConfiguration != null) {
+            setStatus(ACTION_STATUS_DISCONNECT, mConfiguration.getId(), null);
+        } else {
+            setStatus(ACTION_STATUS_IDLE, null, null);
+        }
 
         if (mThread != null) {
             mThread.interrupt();
@@ -211,7 +212,6 @@ public class IodineVpnService extends VpnService implements Runnable {
         }
     }
 
-    @TargetApi(21)
     private Network getActiveNetwork() {
         ConnectivityManager cm =
                 (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
@@ -235,29 +235,27 @@ public class IodineVpnService extends VpnService implements Runnable {
 
             String tunnelNameserver = "";
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                ConnectivityManager cm =
-                        (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
-                Network activeNetwork = getActiveNetwork();
-                if (activeNetwork == null) {
-                    String errorMessage = getString(R.string.vpnservice_error_no_active_network);
-                    setStatus(ACTION_STATUS_ERROR, mConfiguration.getId(), errorMessage);
-                    Log.e(TAG, "No active network. Aborting...");
-                    return;
+            ConnectivityManager cm =
+                    (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            Network activeNetwork = getActiveNetwork();
+            if (activeNetwork == null) {
+                String errorMessage = getString(R.string.vpnservice_error_no_active_network);
+                setStatus(ACTION_STATUS_ERROR, mConfiguration.getId(), errorMessage);
+                Log.e(TAG, "No active network. Aborting...");
+                return;
+            }
+            LinkProperties prop = cm.getLinkProperties(activeNetwork);
+            assert prop != null;
+            List<InetAddress> servers = prop.getDnsServers();
+            for (InetAddress candidate : servers) {
+                Log.d(TAG, "detected dns server: " + candidate);
+                if (candidate instanceof Inet4Address) {
+                    tunnelNameserver = candidate.getHostAddress();
+                    break;
                 }
-                LinkProperties prop = cm.getLinkProperties(activeNetwork);
-                List<InetAddress> servers = prop.getDnsServers();
-                for (InetAddress candidate : servers) {
-                    Log.d(TAG, "detected dns server: " + candidate);
-                    if (candidate instanceof Inet4Address) {
-                        tunnelNameserver = candidate.getHostAddress();
-                        break;
-                    }
-                }
-            } else {
-                tunnelNameserver = IodineClient.getPropertyNetDns1();
             }
 
+            assert tunnelNameserver != null;
             if (tunnelNameserver.isEmpty()) {
                 String errorMessage = getString(R.string.vpnservice_error_dns_detect_failed);
                 setStatus(ACTION_STATUS_ERROR, mConfiguration.getId(), errorMessage);
@@ -286,15 +284,14 @@ public class IodineVpnService extends VpnService implements Runnable {
                     setStatus(ACTION_STATUS_IDLE, null, null);
                     break;
                 case 1:
-                    if (errorMessage.equals(""))
-                        errorMessage = getString(R.string.vpnservice_error_cant_open_dnssocket);
+                    errorMessage = getString(R.string.vpnservice_error_cant_open_dnssocket);
                     // Fall through
                 case 2:
-                    if (errorMessage.equals(""))
+                    if (errorMessage.isEmpty())
                         errorMessage = getString(R.string.vpnservice_error_handshake_failed);
                     // fall through
                 default:
-                    if (errorMessage.equals(""))
+                    if (errorMessage.isEmpty())
                         errorMessage = String.format(getString(R.string.vpnservice_error_unknown_error_code), ret);
 
                     setStatus(ACTION_STATUS_ERROR, mConfiguration.getId(), errorMessage);

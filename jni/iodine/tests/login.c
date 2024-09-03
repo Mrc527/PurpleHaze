@@ -2,7 +2,7 @@
  * Copyright (c) 2006-2014 Erik Ekman <yarrick@kryo.se>,
  * 2006-2009 Bjorn Andersson <flex@kryo.se>
  *
- * Permission to use, copy, modify, and distribute this software for any
+ * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
  * copyright notice and this permission notice appear in all copies.
  *
@@ -34,7 +34,7 @@ START_TEST(test_login_hash)
 
 	memset(ans, 0, sizeof(ans));
 	login_calculate(ans, len, pass, seed);
-	fail_unless(strncmp(ans, good, len) == 0, NULL);
+	ck_assert(strncmp(ans, good, len) == 0);
 }
 END_TEST
 
@@ -54,12 +54,12 @@ START_TEST(test_login_hash_short)
 
 	/* If len < 16, it should do nothing */
 	login_calculate(ans, len, pass, seed);
-	fail_if(memcmp(ans, check, sizeof(ans)));
+	ck_assert(memcmp(ans, check, sizeof(ans)) == 0);
 }
 END_TEST
 
 TCase *
-test_login_create_tests()
+test_login_create_tests(void)
 {
 	TCase *tc;
 

@@ -2,7 +2,7 @@
  * Copyright (c) 2006-2014 Erik Ekman <yarrick@kryo.se>,
  * 2006-2009 Bjorn Andersson <flex@kryo.se>
  *
- * Permission to use, copy, modify, and distribute this software for any
+ * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
  * copyright notice and this permission notice appear in all copies.
  *
@@ -17,12 +17,12 @@
 
 #include <stdio.h>
 #include "common.h"
+#include "util.h"
 
-char *
-get_resolvconf_addr()
+char *get_resolvconf_addr(void)
 {
 	static char addr[16];
-	char *rv;
+	char *rv = NULL;
 #ifndef WINDOWS32
 	char buf[80];
 	FILE *fp;
@@ -36,9 +36,6 @@ get_resolvconf_addr()
 		rv = addr;
 	pclose(fp);
 #else
-
-	rv = NULL;
-
 	if ((fp = fopen("/etc/resolv.conf", "r")) == NULL)
 		err(1, "/etc/resolv.conf");
 
@@ -58,7 +55,6 @@ get_resolvconf_addr()
 	ULONG       buflen;
 	DWORD       ret;
 
-	rv = NULL;
 	fixed_info = malloc(sizeof(FIXED_INFO));
 	buflen = sizeof(FIXED_INFO);
 

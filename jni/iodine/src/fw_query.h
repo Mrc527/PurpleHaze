@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2008-2014 Erik Ekman <yarrick@kryo.se>
  *
- * Permission to use, copy, modify, and distribute this software for any
+ * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
  * copyright notice and this permission notice appear in all copies.
  *
@@ -33,7 +33,7 @@ struct fw_query {
 	unsigned short id;
 };
 
-void fw_query_init();
+void fw_query_init(void);
 void fw_query_put(struct fw_query *fw_query);
 void fw_query_get(unsigned short query_id, struct fw_query **fw_query);
 

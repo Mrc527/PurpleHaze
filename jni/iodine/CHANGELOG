@@ -1,9 +1,31 @@
 
-iodine - http://code.kryo.se/iodine
+iodine - https://code.kryo.se/iodine
 
-***********************************
+************************************
 
 CHANGES:
+
+master:
+	- Changed deprecated tzsetwall() to tzset() (only used by FreeBSD),
+	  patch by Pouria Mousavizadeh Tehrani.
+    - Now builds on macOS even without if_utun.h (pre 10.6).
+
+2023-04-17: 0.8.0 "Burning Snowman"
+	- Mac OS X: Support native utun VPN devices. Patch by
+		Peter Sagerson, ported from OpenVPN by Catalin Patulea.
+	- Fix compilation failure on kFreeBSD and Hurd, by Gregor Herrmann
+	- Patch from Ryan Welton that fixes compilation warning.
+	- README converted to markdown by Nicolas Braud-Santoni.
+	- Linux: use pkg-config for systemd support flags.
+		Patch by Jason A. Donenfeld.
+	- Add support for IPv6 in the server.
+	   Raw mode will be with same protocol as used for login.
+	   Traffic inside tunnel is still IPv4.
+	- Update android build to try to support 5.0 (Lollipop) and newer.
+	- Change external IP lookup to using myip.opendns.com via DNS.
+	- Add option to choose IPv4 listen address from external IP lookup.
+	- Add server support for handling multiple domains via wildcard.
+	- Recognize tap device component id 'root' prefix on Windows.
 
 2014-06-16: 0.7.0 "Kryoptonite"
 	- Partial IPv6 support (#107)
@@ -155,10 +177,10 @@ CHANGES:
 	- New encoding, 25% more peak upstream throughput
 	- New -l option to set local ip to listen to on server
 
-2006-07-11: 0.3.1 
+2006-07-11: 0.3.1
 	- Add Mac OSX support
 	- Add setting device name
-	- Use compression of domain name in reply (should allow setting MTU 
+	- Use compression of domain name in reply (should allow setting MTU
 		approx 200 bytes higher)
 
 2006-06-24: 0.3.0

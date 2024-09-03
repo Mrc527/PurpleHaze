@@ -2,7 +2,7 @@
  * Copyright (c) 2006-2014 Erik Ekman <yarrick@kryo.se>,
  * 2006-2009 Bjorn Andersson <flex@kryo.se>
  *
- * Permission to use, copy, modify, and distribute this software for any
+ * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
  * copyright notice and this permission notice appear in all copies.
  *
@@ -22,8 +22,6 @@
 
 #include "encoding.h"
 #include "test.h"
-#include "base32.h"
-#include "base64.h"
 
 #define TUPLES 4
 
@@ -52,8 +50,7 @@ START_TEST(test_inline_dotify)
 	b = temp;
 	inline_dotify(b, sizeof(temp));
 
-	fail_unless(strcmp(dottests[_i].b, temp) == 0,
-			"'%s' != '%s'", temp, dottests[_i].b);
+	ck_assert_str_eq(dottests[_i].b, temp);
 }
 END_TEST
 
@@ -67,8 +64,7 @@ START_TEST(test_inline_undotify)
 	b = temp;
 	inline_undotify(b, sizeof(temp));
 
-	fail_unless(strcmp(dottests[_i].a, temp) == 0,
-			"'%s' != '%s'", temp, dottests[_i].a);
+	ck_assert_str_eq(dottests[_i].a, temp);
 }
 END_TEST
 
@@ -87,16 +83,17 @@ START_TEST(test_build_hostname)
 	buflen = sizeof(buf);
 
 	for (i = 1; i < sizeof(data); i++) {
-		int len = build_hostname(buf, buflen, data, i, topdomain, get_base32_encoder(), sizeof(buf));
+		int len = build_hostname(buf, buflen, data, i, topdomain, &base32_ops, sizeof(buf));
 
-		fail_if(len > i);
-		fail_if(strstr(buf, ".."), "Found double dots when encoding data len %d! buf: %s", i, buf);
+		ck_assert(len <= i);
+		ck_assert_msg(strstr(buf, "..") == NULL,
+			"Found double dots when encoding data len %d! buf: %s", i, buf);
 	}
 }
 END_TEST
 
 TCase *
-test_encoding_create_tests()
+test_encoding_create_tests(void)
 {
 	TCase *tc;
 

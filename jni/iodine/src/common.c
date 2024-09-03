@@ -2,7 +2,7 @@
  * 2006-2009 Bjorn Andersson <flex@kryo.se>
  * Copyright (c) 2007 Albert Lee <trisk@acm.jhu.edu>.
  *
- * Permission to use, copy, modify, and distribute this software for any
+ * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
  * copyright notice and this permission notice appear in all copies.
  *
@@ -57,7 +57,7 @@
 const unsigned char raw_header[RAW_HDR_LEN] = { 0x10, 0xd1, 0x9e, 0x00 };
 
 /* daemon(3) exists only in 4.4BSD or later, and in GNU libc */
-#if !defined(ANDROID) && !defined(WINDOWS32) && !(defined(BSD) && (BSD >= 199306)) && !defined(__GLIBC__)
+#if !defined(ANDROID) && !defined(WINDOWS32) && !(defined(BSD) && (BSD >= 199306)) && !defined(__GLIBC__) && !defined(__HAIKU__)
 static int daemon(int nochdir, int noclose)
 {
  	int fd, i;
@@ -101,18 +101,16 @@ int setgroups(int count, int *groups)
 }
 #endif
 
-
-void
-check_superuser(void (*usage_fn)(void))
-{
 #ifndef WINDOWS32
+void
+check_superuser(void)
+{
 	if (geteuid() != 0) {
-		warnx("Run as root and you'll be happy.\n");
-		usage_fn();
-		/* NOTREACHED */
+		warnx("Run as root and you'll be happy.");
+		exit(-1);
 	}
-#endif
 }
+#endif
 
 char *
 format_addr(struct sockaddr_storage *sockaddr, int sockaddr_len)
@@ -173,7 +171,13 @@ get_addr(char *host, int port, int addr_family, int flags, struct sockaddr_stora
 int
 open_dns(struct sockaddr_storage *sockaddr, size_t sockaddr_len)
 {
-	int flag = 1;
+	return open_dns_opt(sockaddr, sockaddr_len, -1);
+}
+
+int
+open_dns_opt(struct sockaddr_storage *sockaddr, size_t sockaddr_len, int v6only)
+{
+	int flag;
 	int fd;
 
 	if ((fd = socket(sockaddr->ss_family, SOCK_DGRAM, IPPROTO_UDP)) < 0) {
@@ -187,11 +191,12 @@ open_dns(struct sockaddr_storage *sockaddr, size_t sockaddr_len)
 	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const void*) &flag, sizeof(flag));
 
 #ifndef WINDOWS32
-	/* To get destination address from each UDP datagram, see iodined.c:read_dns() */
-	setsockopt(fd, IPPROTO_IP, DSTADDR_SOCKOPT, (const void*) &flag, sizeof(flag));
-
 	fd_set_close_on_exec(fd);
 #endif
+
+	if (sockaddr->ss_family == AF_INET6 && v6only >= 0) {
+		setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, (const void*) &v6only, sizeof(v6only));
+	}
 
 #ifdef IP_OPT_DONT_FRAG
 	/* Set dont-fragment ip header flag */
@@ -199,8 +204,8 @@ open_dns(struct sockaddr_storage *sockaddr, size_t sockaddr_len)
 	setsockopt(fd, IPPROTO_IP, IP_OPT_DONT_FRAG, (const void*) &flag, sizeof(flag));
 #endif
 
-	if(bind(fd, (struct sockaddr*) sockaddr, sockaddr_len) < 0)
-		err(1, "bind");
+	if (bind(fd, (struct sockaddr*) sockaddr, sockaddr_len) < 0)
+		err(1, "bind() to %s", format_addr(sockaddr, sockaddr_len));
 
 	fprintf(stderr, "Opened IPv%d UDP socket\n", sockaddr->ss_family == AF_INET6 ? 6 : 4);
 
@@ -271,7 +276,7 @@ do_pidfile(char *pidfile)
 }
 
 void
-do_detach()
+do_detach(void)
 {
 #ifndef WINDOWS32
 	fprintf(stderr, "Detaching from terminal...\n");
@@ -300,7 +305,7 @@ read_password(char *buf, size_t len)
 	int i;
 #endif
 
-	fprintf(stderr, "Enter password: ");
+	fprintf(stderr, "Enter tunnel password: ");
 	fflush(stderr);
 #ifndef WINDOWS32
 	fscanf(stdin, "%79[^\n]", pwd);
@@ -327,7 +332,7 @@ read_password(char *buf, size_t len)
 }
 
 int
-check_topdomain(char *str, char **errormsg)
+check_topdomain(char *str, int allow_wildcard, char **errormsg)
 {
 	int i;
 	int dots = 0;
@@ -347,8 +352,8 @@ check_topdomain(char *str, char **errormsg)
 		return 1;
 	}
 
-	for( i = 0; i < strlen(str); i++) {
-		if(str[i] == '.') {
+	for (i = 0; i < strlen(str); i++) {
+		if (str[i] == '.') {
 			dots++;
 			if (chunklen == 0) {
 				if (errormsg) *errormsg = "Consecutive dots";
@@ -362,9 +367,21 @@ check_topdomain(char *str, char **errormsg)
 		} else {
 			chunklen++;
 		}
-		if( (str[i] >= 'a' && str[i] <= 'z') || (str[i] >= 'A' && str[i] <= 'Z') ||
-				isdigit(str[i]) || str[i] == '-' || str[i] == '.' ) {
+		if ((str[i] >= 'a' && str[i] <= 'z') || (str[i] >= 'A' && str[i] <= 'Z') ||
+				isdigit(str[i]) || str[i] == '-' || str[i] == '.') {
 			continue;
+		} else if (allow_wildcard && str[i] == '*') {
+			/* First char allowed to be wildcard, if followed by dot */
+			if (i == 0) {
+				if (str[i+1] == '.') {
+					continue;
+				}
+				if (errormsg) *errormsg = "Wildcard (*) must be followed by dot";
+				return 1;
+			} else {
+				if (errormsg) *errormsg = "Wildcard (*) only allowed as first char";
+				return 1;
+			}
 		} else {
 			if (errormsg) *errormsg = "Contains illegal character (allowed: [a-zA-Z0-9-.])";
 			return 1;
@@ -387,6 +404,52 @@ check_topdomain(char *str, char **errormsg)
 	return 0;
 }
 
+int
+query_datalen(const char *qname, const char *topdomain)
+{
+	/* Return number of data bytes embedded in DNS query name,
+	 * or -1 if domains do not match.
+	 */
+	int qpos = strlen(qname);
+	int tpos = strlen(topdomain);
+	if (tpos < 3 || qpos < tpos) {
+		/* Domain or query name too short */
+		return -1;
+	}
+	/* Backward string compare */
+	qpos--;
+	tpos--;
+	while (qpos >= 0) {
+		if (topdomain[tpos] == '*') {
+			/* Wild match, is first in topdomain */
+			if (qname[qpos] == '*') {
+				/* Don't match against stars in query name */
+				return -1;
+			} else if (qpos == 0 || qname[qpos-1] == '.') {
+				/* Reached start of query name or chunk separator */
+				return qpos;
+			}
+			qpos--;
+		} else if (tolower(qname[qpos]) == tolower(topdomain[tpos])) {
+			/* Matching char, exclude wildcard in query name */
+			if (tpos == 0) {
+				/* Fully matched domain */
+				if (qpos == 0 || qname[qpos-1] == '.') {
+					/* Start of name or has dot before matching topdomain */
+					return qpos;
+				}
+				/* Query name has longer chunk than topdomain */
+				return -1;
+			}
+			tpos--;
+			qpos--;
+		} else {
+			return -1;
+		}
+	}
+	return -1;
+}
+
 #if defined(WINDOWS32) || defined(ANDROID)
 #ifndef ANDROID
 int
@@ -398,12 +461,9 @@ inet_aton(const char *cp, struct in_addr *inp)
 #endif
 
 void
-warn(const char *fmt, ...)
+vwarn(const char *fmt, va_list list)
 {
-	va_list list;
-
-	va_start(list, fmt);
-	if (fmt) fprintf(stderr, fmt, list);
+	if (fmt) vfprintf(stderr, fmt, list);
 #ifndef ANDROID
 	if (errno == 0) {
 		fprintf(stderr, ": WSA error %d\n", WSAGetLastError());
@@ -411,17 +471,15 @@ warn(const char *fmt, ...)
 		fprintf(stderr, ": %s\n", strerror(errno));
 	}
 #endif
-	va_end(list);
 }
 
 void
-warnx(const char *fmt, ...)
+warn(const char *fmt, ...)
 {
 	va_list list;
 
 	va_start(list, fmt);
-	if (fmt) fprintf(stderr, fmt, list);
-	fprintf(stderr, "\n");
+	vwarn(fmt, list);
 	va_end(list);
 }
 
@@ -431,9 +489,26 @@ err(int eval, const char *fmt, ...)
 	va_list list;
 
 	va_start(list, fmt);
-	warn(fmt, list);
+	vwarn(fmt, list);
 	va_end(list);
 	exit(eval);
+}
+
+void
+vwarnx(const char *fmt, va_list list)
+{
+	if (fmt) vfprintf(stderr, fmt, list);
+	fprintf(stderr, "\n");
+}
+
+void
+warnx(const char *fmt, ...)
+{
+	va_list list;
+
+	va_start(list, fmt);
+	vwarnx(fmt, list);
+	va_end(list);
 }
 
 void
@@ -442,7 +517,7 @@ errx(int eval, const char *fmt, ...)
 	va_list list;
 
 	va_start(list, fmt);
-	warnx(fmt, list);
+	vwarnx(fmt, list);
 	va_end(list);
 	exit(eval);
 }
@@ -453,15 +528,15 @@ void android_log_callback(const char *);
 static char printf_buf[1024];;
 void android_printf(const char *fmt, ...)
 {
-	va_list list;
-	va_start(list, fmt);
+    va_list list;
+    va_start(list, fmt);
 
-	vsnprintf(printf_buf,1024,fmt,list);
+    vsnprintf(printf_buf,1024,fmt,list);
     android_log_callback(printf_buf);
 
-     __android_log_vprint(ANDROID_LOG_INFO, "Iodine",
+    __android_log_vprint(ANDROID_LOG_INFO, "Iodine",
                          fmt, list);
-	va_end(list);
+    va_end(list);
 }
 #endif
 

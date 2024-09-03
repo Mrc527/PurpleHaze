@@ -2,7 +2,7 @@
  * Copyright (c) 2006-2014 Erik Ekman <yarrick@kryo.se>,
  * 2006-2009 Bjorn Andersson <flex@kryo.se>
  *
- * Permission to use, copy, modify, and distribute this software for any
+ * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
  * copyright notice and this permission notice appear in all copies.
  *
@@ -31,12 +31,11 @@
 
 #ifdef WINDOWS32
 #include "windows.h"
-#include <winsock2.h>
 #else
+#include <arpa/nameser.h>
 #ifdef ANDROID
 #include "android_dns.h"
 #endif
-#include <arpa/nameser.h>
 #ifdef DARWIN
 #define BIND_8_COMPAT
 #include <arpa/nameser_compat.h>
@@ -48,10 +47,6 @@
 
 #include "common.h"
 #include "encoding.h"
-#include "base32.h"
-#include "base64.h"
-#include "base64u.h"
-#include "base128.h"
 #include "dns.h"
 #include "login.h"
 #include "tun.h"
@@ -65,7 +60,8 @@ static const char *password;
 
 static struct sockaddr_storage nameserv;
 static int nameserv_len;
-static struct sockaddr_in raw_serv;
+static struct sockaddr_storage raw_serv;
+static int raw_serv_len;
 static const char *topdomain;
 
 static uint16_t rand_seed;
@@ -85,16 +81,9 @@ static uint16_t chunkid;
 static uint16_t chunkid_prev;
 static uint16_t chunkid_prev2;
 
-/* Base32 encoder used for non-data packets and replies */
-static struct encoder *b32;
-/* Base64 etc encoders for replies */
-static struct encoder *b64;
-static struct encoder *b64u;
-static struct encoder *b128;
-
 /* The encoder used for data packets
  * Defaults to Base32, can be changed after handshake */
-static struct encoder *dataenc;
+const static struct encoder *dataenc = &base32_ops;
 
 /* The encoder to use for downstream data */
 static char downenc = ' ';
@@ -114,14 +103,9 @@ static long send_query_recvcnt = 0;
 static int hostname_maxlen = 0xFF;
 
 void
-client_init()
+client_init(void)
 {
 	running = 1;
-	b32 = get_base32_encoder();
-	b64 = get_base64_encoder();
-	b64u = get_base64u_encoder();
-	b128 = get_base128_encoder();
-	dataenc = get_base32_encoder();
 	rand_seed = ((unsigned int) rand()) & 0xFFFF;
 	send_ping_soon = 1;	/* send ping immediately after startup */
 	conn = CONN_DNS_NULL;
@@ -140,13 +124,13 @@ client_init()
 }
 
 void
-client_stop()
+client_stop(void)
 {
 	running = 0;
 }
 
 enum connection
-client_get_conn()
+client_get_conn(void)
 {
 	return conn;
 }
@@ -174,7 +158,7 @@ int
 client_set_qtype(char *qtype)
 {
 	if (!strcasecmp(qtype, "NULL"))
-      		do_qtype = T_NULL;
+		do_qtype = T_NULL;
 	else if (!strcasecmp(qtype, "PRIVATE"))
 		do_qtype = T_PRIVATE;
 	else if (!strcasecmp(qtype, "CNAME"))
@@ -187,14 +171,13 @@ client_set_qtype(char *qtype)
 		do_qtype = T_SRV;
 	else if (!strcasecmp(qtype, "TXT"))
 		do_qtype = T_TXT;
-	// Added for Andiodine:
-	else
-		do_qtype = T_UNSET;
+    else
+        do_qtype = T_UNSET;
 	return (do_qtype == T_UNSET);
 }
 
 char *
-client_get_qtype()
+client_get_qtype(void)
 {
 	char *c = "UNDEFINED";
 
@@ -244,9 +227,9 @@ client_set_hostname_maxlen(int i)
 }
 
 const char *
-client_get_raw_addr()
+client_get_raw_addr(void)
 {
-	return inet_ntoa(raw_serv.sin_addr);
+	return format_addr(&raw_serv, raw_serv_len);
 }
 
 static void
@@ -311,7 +294,7 @@ send_query(int fd, char *hostname)
 }
 
 static void
-send_raw(int fd, char *buf, int buflen, int user, int cmd)
+send_raw(int fd, char *buf, int buflen, int cmd)
 {
 	char packet[4096];
 	int len;
@@ -324,7 +307,7 @@ send_raw(int fd, char *buf, int buflen, int user, int cmd)
 	}
 
 	len += RAW_HDR_LEN;
-	packet[RAW_HDR_CMD] = cmd | (user & 0x0F);
+	packet[RAW_HDR_CMD] = cmd | (userid & 0x0F);
 
 	sendto(fd, packet, len, 0, (struct sockaddr*)&raw_serv, sizeof(raw_serv));
 }
@@ -332,7 +315,7 @@ send_raw(int fd, char *buf, int buflen, int user, int cmd)
 static void
 send_raw_data(int dns_fd)
 {
-	send_raw(dns_fd, outpkt.data, outpkt.len, userid, RAW_HDR_CMD_DATA);
+	send_raw(dns_fd, outpkt.data, outpkt.len, RAW_HDR_CMD_DATA);
 	outpkt.len = 0;
 }
 
@@ -345,12 +328,11 @@ send_packet(int fd, char cmd, const char *data, const size_t datalen)
 	buf[0] = cmd;
 
 	build_hostname(buf + 1, sizeof(buf) - 1, data, datalen, topdomain,
-		       b32, hostname_maxlen);
+		       &base32_ops, hostname_maxlen);
 	send_query(fd, buf);
 }
 
-static inline int
-is_sending()
+static inline int is_sending(void)
 {
 	return (outpkt.len != 0);
 }
@@ -420,7 +402,7 @@ send_ping(int fd)
 
 		send_packet(fd, 'p', data, sizeof(data));
 	} else {
-		send_raw(fd, NULL, 0, userid, RAW_HDR_CMD_PING);
+		send_raw(fd, NULL, 0, RAW_HDR_CMD_PING);
 	}
 }
 
@@ -484,7 +466,7 @@ dns_namedec(char *outdata, int outdatalen, char *buf, int buflen)
 
 		/* this also does undotify */
 		return unpack_data(outdata, outdatalen, buf + 1, buflen - 4,
-				   b32);
+				   &base32_ops);
 
 	case 'i': /* Hostname++ with base64 */
 	case 'I':
@@ -494,7 +476,7 @@ dns_namedec(char *outdata, int outdatalen, char *buf, int buflen)
 
 		/* this also does undotify */
 		return unpack_data(outdata, outdatalen, buf + 1, buflen - 4,
-				   b64);
+				   &base64_ops);
 
 	case 'j': /* Hostname++ with base64u */
 	case 'J':
@@ -504,7 +486,7 @@ dns_namedec(char *outdata, int outdatalen, char *buf, int buflen)
 
 		/* this also does undotify */
 		return unpack_data(outdata, outdatalen, buf + 1, buflen - 4,
-				   b64u);
+				   &base64u_ops);
 
 	case 'k': /* Hostname++ with base128 */
 	case 'K':
@@ -514,35 +496,35 @@ dns_namedec(char *outdata, int outdatalen, char *buf, int buflen)
 
 		/* this also does undotify */
 		return unpack_data(outdata, outdatalen, buf + 1, buflen - 4,
-				   b128);
+				   &base128_ops);
 
 	case 't': /* plain base32(Thirty-two) from TXT */
 	case 'T':
 		if (buflen < 2)
 			return 0;
 
-		return b32->decode(outdata, &outdatalenu, buf + 1, buflen - 1);
+		return base32_ops.decode(outdata, &outdatalenu, buf + 1, buflen - 1);
 
 	case 's': /* plain base64(Sixty-four) from TXT */
 	case 'S':
 		if (buflen < 2)
 			return 0;
 
-		return b64->decode(outdata, &outdatalenu, buf + 1, buflen - 1);
+		return base64_ops.decode(outdata, &outdatalenu, buf + 1, buflen - 1);
 
 	case 'u': /* plain base64u (Underscore) from TXT */
 	case 'U':
 		if (buflen < 2)
 			return 0;
 
-		return b64u->decode(outdata, &outdatalenu, buf + 1, buflen - 1);
+		return base64_ops.decode(outdata, &outdatalenu, buf + 1, buflen - 1);
 
 	case 'v': /* plain base128 from TXT */
 	case 'V':
 		if (buflen < 2)
 			return 0;
 
-		return b128->decode(outdata, &outdatalenu, buf + 1, buflen - 1);
+		return base128_ops.decode(outdata, &outdatalenu, buf + 1, buflen - 1);
 
 	case 'r': /* Raw binary from TXT */
 	case 'R':
@@ -853,7 +835,7 @@ tunnel_dns(int tun_fd, int dns_fd)
 			}
 		}
 
-		/* read==1 happens with "QMEM" illegal replies, caused by
+		/* read == 1 happens with "QMEM" illegal replies, caused by
 		   heavy reordering, or after short disconnections when
 		   data-CMC has looped around into the "duplicate" values.
 		   All these cases are helped by faster pinging. */
@@ -1032,7 +1014,7 @@ tunnel_dns(int tun_fd, int dns_fd)
 			send_something_now = 1;
 		}
 
-	        break;
+		break;
 	}
 
 	/* NOTE: buf[] was overwritten when down-packet complete */
@@ -1099,113 +1081,113 @@ tunnel_dns(int tun_fd, int dns_fd)
 static int
 always_1()
 {
-	return 1;
+    return 1;
 }
 
 int
 client_tunnel(int tun_fd, int dns_fd)
 {
-	return client_tunnel_cb(tun_fd, dns_fd, &always_1);
+    return client_tunnel_cb(tun_fd, dns_fd, &always_1);
 }
 
 int
 client_tunnel_cb(int tun_fd, int dns_fd, int
-                 (*cb_ask_continue)())
+(*cb_ask_continue)())
 {
-	struct timeval tv;
-	fd_set fds;
-	int rv;
-	int i;
+    struct timeval tv;
+    fd_set fds;
+    int rv;
+    int i;
 
-	rv = 0;
-	lastdownstreamtime = time(NULL);
-	send_query_sendcnt = 0;  /* start counting now */
+    rv = 0;
+    lastdownstreamtime = time(NULL);
+    send_query_sendcnt = 0;  /* start counting now */
 
-	while (running && cb_ask_continue()) {
-		tv.tv_sec = selecttimeout;
-		tv.tv_usec = 0;
+    while (running && cb_ask_continue()) {
+        tv.tv_sec = selecttimeout;
+        tv.tv_usec = 0;
 
-		if (is_sending()) {
-			/* fast timeout for retransmits */
-			tv.tv_sec = 1;
-			tv.tv_usec = 0;
-		}
+        if (is_sending()) {
+            /* fast timeout for retransmits */
+            tv.tv_sec = 1;
+            tv.tv_usec = 0;
+        }
 
-		if (send_ping_soon) {
-			tv.tv_sec = 0;
-			tv.tv_usec = send_ping_soon * 1000;
-		}
+        if (send_ping_soon) {
+            tv.tv_sec = 0;
+            tv.tv_usec = send_ping_soon * 1000;
+        }
 
-		FD_ZERO(&fds);
-		if (!is_sending() || outchunkresent >= 2) {
-			/* If re-sending upstream data, chances are that
-			   we're several seconds behind already and TCP
-			   will start filling tun buffer with (useless)
-			   retransmits.
-			   Get up-to-date fast by simply dropping stuff,
-			   that's what TCP is designed to handle. */
-			FD_SET(tun_fd, &fds);
-		}
-		FD_SET(dns_fd, &fds);
+        FD_ZERO(&fds);
+        if (!is_sending() || outchunkresent >= 2) {
+            /* If re-sending upstream data, chances are that
+               we're several seconds behind already and TCP
+               will start filling tun buffer with (useless)
+               retransmits.
+               Get up-to-date fast by simply dropping stuff,
+               that's what TCP is designed to handle. */
+            FD_SET(tun_fd, &fds);
+        }
+        FD_SET(dns_fd, &fds);
 
-		i = select(MAX(tun_fd, dns_fd) + 1, &fds, NULL, NULL, &tv);
+        i = select(MAX(tun_fd, dns_fd) + 1, &fds, NULL, NULL, &tv);
 
- 		if (lastdownstreamtime + 60 < time(NULL)) {
- 			warnx("No downstream data received in 60 seconds, shutting down.");
- 			running = 0;
- 		}
+        if (lastdownstreamtime + 60 < time(NULL)) {
+            warnx("No downstream data received in 60 seconds, shutting down.");
+            running = 0;
+        }
 
-		if (running == 0)
-			break;
+        if (running == 0)
+            break;
 
-		if (i < 0)
-			err(1, "select");
+        if (i < 0)
+            err(1, "select");
 
-		if (i == 0) {
-			/* timeout */
-			if (is_sending()) {
-				/* Re-send current fragment; either frag
-				   or ack probably dropped somewhere.
-				   But problem: no cache-miss-counter,
-				   so hostname will be identical.
-				   Just drop whole packet after 3 retries,
-				   and TCP retransmit will solve it.
-				   NOTE: tun dropping above should be
-				   >=(value_here - 1) */
-				if (outchunkresent < 3) {
-					outchunkresent++;
-					send_chunk(dns_fd);
-				} else {
-					outpkt.offset = 0;
-					outpkt.len = 0;
-					outpkt.sentlen = 0;
-					outchunkresent = 0;
+        if (i == 0) {
+            /* timeout */
+            if (is_sending()) {
+                /* Re-send current fragment; either frag
+                   or ack probably dropped somewhere.
+                   But problem: no cache-miss-counter,
+                   so hostname will be identical.
+                   Just drop whole packet after 3 retries,
+                   and TCP retransmit will solve it.
+                   NOTE: tun dropping above should be
+                   >=(value_here - 1) */
+                if (outchunkresent < 3) {
+                    outchunkresent++;
+                    send_chunk(dns_fd);
+                } else {
+                    outpkt.offset = 0;
+                    outpkt.len = 0;
+                    outpkt.sentlen = 0;
+                    outchunkresent = 0;
 
-					send_ping(dns_fd);
-				}
-			} else {
-				send_ping(dns_fd);
-			}
-			send_ping_soon = 0;
+                    send_ping(dns_fd);
+                }
+            } else {
+                send_ping(dns_fd);
+            }
+            send_ping_soon = 0;
 
-		} else {
+        } else {
 
-			if (FD_ISSET(tun_fd, &fds)) {
-				if (tunnel_tun(tun_fd, dns_fd) <= 0)
-					continue;
-				/* Returns -1 on error OR when quickly
-				   dropping data in case of DNS congestion;
-				   we need to _not_ do tunnel_dns() then.
-				   If chunk sent, sets send_ping_soon=0. */
-			}
-			if (FD_ISSET(dns_fd, &fds)) {
-				if (tunnel_dns(tun_fd, dns_fd) <= 0)
-					continue;
-			}
-		}
-	}
+            if (FD_ISSET(tun_fd, &fds)) {
+                if (tunnel_tun(tun_fd, dns_fd) <= 0)
+                    continue;
+                /* Returns -1 on error OR when quickly
+                   dropping data in case of DNS congestion;
+                   we need to _not_ do tunnel_dns() then.
+                   If chunk sent, sets send_ping_soon=0. */
+            }
+            if (FD_ISSET(dns_fd, &fds)) {
+                if (tunnel_dns(tun_fd, dns_fd) <= 0)
+                    continue;
+            }
+        }
+    }
 
-	return rv;
+    return rv;
 }
 
 static void
@@ -1288,116 +1270,74 @@ send_version(int fd, uint32_t version)
 	send_packet(fd, 'v', data, sizeof(data));
 }
 
+/* Add lower 15 bits of rand seed as base32,
+ * followed by a dot and the tunnel domain and send */
 static void
-send_ip_request(int fd, int userid)
+send_handshake_query(int fd, char *prefix)
 {
-	char buf[512] = "i____.";
-	buf[1] = b32_5to8(userid);
+	char buf[300];
+	char cmc_dot[5];
 
-	buf[2] = b32_5to8((rand_seed >> 10) & 0x1f);
-	buf[3] = b32_5to8((rand_seed >> 5) & 0x1f);
-	buf[4] = b32_5to8((rand_seed ) & 0x1f);
+	cmc_dot[0] = b32_5to8((rand_seed >> 10) & 0x1f);
+	cmc_dot[1] = b32_5to8((rand_seed >> 5) & 0x1f);
+	cmc_dot[2] = b32_5to8((rand_seed) & 0x1f);
+	cmc_dot[3] = '.';
+	cmc_dot[4] = 0;
 	rand_seed++;
 
-	strncat(buf, topdomain, 512 - strlen(buf));
+	buf[0] = 0;
+	strncat(buf, prefix, 60); /* 63 - space for 3 CMC bytes */
+	strcat(buf, cmc_dot);
+	strncat(buf, topdomain, sizeof(buf) - strlen(buf) - 1);
 	send_query(fd, buf);
 }
 
 static void
-send_raw_udp_login(int dns_fd, int userid, int seed)
+send_raw_udp_login(int dns_fd, int seed)
 {
 	char buf[16];
 	login_calculate(buf, 16, password, seed + 1);
 
-	send_raw(dns_fd, buf, sizeof(buf), userid, RAW_HDR_CMD_LOGIN);
+	send_raw(dns_fd, buf, sizeof(buf), RAW_HDR_CMD_LOGIN);
 }
 
 static void
-send_upenctest(int fd, char *s)
+send_upenctest(int fd, const char *s)
 /* NOTE: String may be at most 63-4=59 chars to fit in 1 dns chunk. */
 {
 	char buf[512] = "z___";
 
 	buf[1] = b32_5to8((rand_seed >> 10) & 0x1f);
 	buf[2] = b32_5to8((rand_seed >> 5) & 0x1f);
-	buf[3] = b32_5to8((rand_seed ) & 0x1f);
+	buf[3] = b32_5to8((rand_seed) & 0x1f);
 	rand_seed++;
 
-	strncat(buf, s, 512);
-	strncat(buf, ".", 512);
+	strncat(buf, s, 128);
+	strncat(buf, ".", 2);
 	strncat(buf, topdomain, 512 - strlen(buf));
 	send_query(fd, buf);
 }
 
 static void
-send_downenctest(int fd, char downenc, int variant, char *s, int slen)
-/* Note: content/handling of s is not defined yet. */
+send_downenctest(int fd, char downenc, int variant)
 {
-	char buf[512] = "y_____.";
+	char prefix[4] = "y__";
+	prefix[1] = tolower(downenc);
+	prefix[2] = b32_5to8(variant);
 
-	buf[1] = tolower(downenc);
-	buf[2] = b32_5to8(variant);
-
-	buf[3] = b32_5to8((rand_seed >> 10) & 0x1f);
-	buf[4] = b32_5to8((rand_seed >> 5) & 0x1f);
-	buf[5] = b32_5to8((rand_seed ) & 0x1f);
-	rand_seed++;
-
-	strncat(buf, topdomain, 512 - strlen(buf));
-	send_query(fd, buf);
+	/* Use send_query directly if we ever send more data here. */
+	send_handshake_query(fd, prefix);
 }
 
 static void
-send_codec_switch(int fd, int userid, int bits)
+send_lazy_switch(int fd)
 {
-	char buf[512] = "s_____.";
-	buf[1] = b32_5to8(userid);
-	buf[2] = b32_5to8(bits);
-
-	buf[3] = b32_5to8((rand_seed >> 10) & 0x1f);
-	buf[4] = b32_5to8((rand_seed >> 5) & 0x1f);
-	buf[5] = b32_5to8((rand_seed ) & 0x1f);
-	rand_seed++;
-
-	strncat(buf, topdomain, 512 - strlen(buf));
-	send_query(fd, buf);
-}
-
-
-static void
-send_downenc_switch(int fd, int userid)
-{
-	char buf[512] = "o_____.";
-	buf[1] = b32_5to8(userid);
-	buf[2] = tolower(downenc);
-
-	buf[3] = b32_5to8((rand_seed >> 10) & 0x1f);
-	buf[4] = b32_5to8((rand_seed >> 5) & 0x1f);
-	buf[5] = b32_5to8((rand_seed ) & 0x1f);
-	rand_seed++;
-
-	strncat(buf, topdomain, 512 - strlen(buf));
-	send_query(fd, buf);
-}
-
-static void
-send_lazy_switch(int fd, int userid)
-{
-	char buf[512] = "o_____.";
-	buf[1] = b32_5to8(userid);
+	char sw_lazy[] = { 'o', b32_5to8(userid), 'i', 0 };
 
 	if (lazymode)
-		buf[2] = 'l';
-	else
-		buf[2] = 'i';
+		sw_lazy[2] = 'l';
 
-	buf[3] = b32_5to8((rand_seed >> 10) & 0x1f);
-	buf[4] = b32_5to8((rand_seed >> 5) & 0x1f);
-	buf[5] = b32_5to8((rand_seed ) & 0x1f);
-	rand_seed++;
-
-	strncat(buf, topdomain, 512 - strlen(buf));
-	send_query(fd, buf);
+	send_handshake_query(fd, sw_lazy);
 }
 
 static int
@@ -1412,7 +1352,7 @@ handshake_version(int dns_fd, int *seed)
 
 	for (i = 0; running && i < 5; i++) {
 
-		send_version(dns_fd, VERSION);
+		send_version(dns_fd, PROTOCOL_VERSION);
 
 		read = handshake_waitdns(dns_fd, in, sizeof(in), 'v', 'V', i+1);
 
@@ -1428,11 +1368,12 @@ handshake_version(int dns_fd, int *seed)
 				userid_char = hex[userid & 15];
 				userid_char2 = hex2[userid & 15];
 
-				fprintf(stderr, "Version ok, both using protocol v 0x%08x. You are user #%d\n", VERSION, userid);
+				fprintf(stderr, "Version ok, both using protocol v 0x%08x. You are user #%d\n",
+					PROTOCOL_VERSION, userid);
 				return 0;
 			} else if (strncmp("VNAK", in, 4) == 0) {
 				warnx("You use protocol v 0x%08x, server uses v 0x%08x. Giving up",
-						VERSION, payload);
+						PROTOCOL_VERSION, payload);
 				return 1;
 			} else if (strncmp("VFUL", in, 4) == 0) {
 				warnx("Server full, all %d slots are taken. Try again later", payload);
@@ -1460,7 +1401,7 @@ handshake_login(int dns_fd, int seed)
 
 	login_calculate(login, 16, password, seed);
 
-	for (i=0; running && i<5 ;i++) {
+	for (i = 0; running && i < 5; i++) {
 
 		send_login(dns_fd, login, 16);
 
@@ -1470,6 +1411,9 @@ handshake_login(int dns_fd, int seed)
 			int netmask;
 			if (strncmp("LNAK", in, 4) == 0) {
 				fprintf(stderr, "Bad password\n");
+				return 1;
+			} else if (strncmp("BADIP", in, 5) == 0) {
+				warnx("BADIP: Server rejected sender IP address (maybe iodined -c will help)");
 				return 1;
 			} else if (sscanf(in, "%64[^-]-%64[^-]-%d-%d",
 				server, client, &mtu, &netmask) == 4) {
@@ -1499,31 +1443,43 @@ static int
 handshake_raw_udp(int dns_fd, int seed)
 {
 	struct timeval tv;
+	char get_ip[] = { 'i', b32_5to8(userid), 0 };
 	char in[4096];
 	fd_set fds;
 	int i;
 	int r;
 	int len;
-	unsigned remoteaddr = 0;
-	struct in_addr server;
+	int got_addr;
 
-	fprintf(stderr, "Testing raw UDP data to the server (skip with -r)");
-	for (i=0; running && i<3 ;i++) {
+	memset(&raw_serv, 0, sizeof(raw_serv));
+	got_addr = 0;
 
-		send_ip_request(dns_fd, userid);
+	fprintf(stderr, "Requesting server address to attempt raw UDP mode (skip with -r) ");
+	fflush(stderr);
+	for (i = 0; running && i < 3; i++) {
+
+		send_handshake_query(dns_fd, get_ip);
 
 		len = handshake_waitdns(dns_fd, in, sizeof(in), 'i', 'I', i+1);
 
 		if (len == 5 && in[0] == 'I') {
-			/* Received IP address */
-			remoteaddr = (in[1] & 0xff);
-			remoteaddr <<= 8;
-			remoteaddr |= (in[2] & 0xff);
-			remoteaddr <<= 8;
-			remoteaddr |= (in[3] & 0xff);
-			remoteaddr <<= 8;
-			remoteaddr |= (in[4] & 0xff);
-			server.s_addr = ntohl(remoteaddr);
+			/* Received IPv4 address */
+			struct sockaddr_in *raw4_serv = (struct sockaddr_in *) &raw_serv;
+			raw4_serv->sin_family = AF_INET;
+			memcpy(&raw4_serv->sin_addr, &in[1], sizeof(struct in_addr));
+			raw4_serv->sin_port = htons(53);
+			raw_serv_len = sizeof(struct sockaddr_in);
+			got_addr = 1;
+			break;
+		}
+		if (len == 17 && in[0] == 'I') {
+			/* Received IPv6 address */
+			struct sockaddr_in6 *raw6_serv = (struct sockaddr_in6 *) &raw_serv;
+			raw6_serv->sin6_family = AF_INET6;
+			memcpy(&raw6_serv->sin6_addr, &in[1], sizeof(struct in6_addr));
+			raw6_serv->sin6_port = htons(53);
+			raw_serv_len = sizeof(struct sockaddr_in6);
+			got_addr = 1;
 			break;
 		}
 
@@ -1534,34 +1490,29 @@ handshake_raw_udp(int dns_fd, int seed)
 	if (!running)
 		return 0;
 
-	if (!remoteaddr) {
+	if (!got_addr) {
 		fprintf(stderr, "Failed to get raw server IP, will use DNS mode.\n");
 		return 0;
 	}
-	fprintf(stderr, "Server is at %s, trying raw login: ", inet_ntoa(server));
+	fprintf(stderr, "Server is at %s, trying raw login: (skip with -r) ",
+		format_addr(&raw_serv, raw_serv_len));
 	fflush(stderr);
-
-	/* Store address to iodined server */
-	memset(&raw_serv, 0, sizeof(raw_serv));
-	raw_serv.sin_family = AF_INET;
-	raw_serv.sin_port = htons(53);
-	raw_serv.sin_addr = server;
 
 	/* do login against port 53 on remote server
 	 * based on the old seed. If reply received,
 	 * switch to raw udp mode */
-	for (i=0; running && i<4 ;i++) {
+	for (i = 0; running && i < 4; i++) {
 		tv.tv_sec = i + 1;
 		tv.tv_usec = 0;
 
-		send_raw_udp_login(dns_fd, userid, seed);
+		send_raw_udp_login(dns_fd, seed);
 
 		FD_ZERO(&fds);
 		FD_SET(dns_fd, &fds);
 
 		r = select(dns_fd + 1, &fds, NULL, NULL, &tv);
 
-		if(r > 0) {
+		if (r > 0) {
 			/* recv() needed for windows, dont change to read() */
 			len = recv(dns_fd, in, sizeof(in), 0);
 			if (len >= (16 + RAW_HDR_LEN)) {
@@ -1585,7 +1536,7 @@ handshake_raw_udp(int dns_fd, int seed)
 }
 
 static int
-handshake_upenctest(int dns_fd, char *s)
+handshake_upenctest(int dns_fd, const char *s)
 /* NOTE: *s may be max 59 chars; must start with "aA" for case-swap check
    Returns:
    -1: case swap, no need for any further test: error printed; or Ctrl-C
@@ -1595,13 +1546,13 @@ handshake_upenctest(int dns_fd, char *s)
 {
 	char in[4096];
 	unsigned char *uin = (unsigned char *) in;
-	unsigned char *us = (unsigned char *) s;
+	const unsigned char *us = (const unsigned char *) s;
 	int i;
 	int read;
-        int slen;
+	int slen;
 
 	slen = strlen(s);
-	for (i=0; running && i<3 ;i++) {
+	for (i = 0; running && i < 3; i++) {
 
 		send_upenctest(dns_fd, s);
 
@@ -1677,17 +1628,17 @@ handshake_upenc_autodetect(int dns_fd)
 	   [A-Z] as first, and [A-Z0-9] as last char _per label_.
 	   Test by having '-' as last char.
 	 */
-        char *pat64="aAbBcCdDeEfFgGhHiIjJkKlLmMnNoOpPqQrRsStTuUvVwWxXyYzZ+0129-";
-        char *pat64u="aAbBcCdDeEfFgGhHiIjJkKlLmMnNoOpPqQrRsStTuUvVwWxXyYzZ_0129-";
-        char *pat128a="aA-Aaahhh-Drink-mal-ein-J\344germeister-";
-        char *pat128b="aA-La-fl\373te-na\357ve-fran\347aise-est-retir\351-\340-Cr\350te";
-        char *pat128c="aAbBcCdDeEfFgGhHiIjJkKlLmMnNoOpPqQrRsStTuUvVwWxXyYzZ";
-        char *pat128d="aA0123456789\274\275\276\277"
-		      "\300\301\302\303\304\305\306\307\310\311\312\313\314\315\316\317";
-        char *pat128e="aA"
-		      "\320\321\322\323\324\325\326\327\330\331\332\333\334\335\336\337"
-		      "\340\341\342\343\344\345\346\347\350\351\352\353\354\355\356\357"
-		      "\360\361\362\363\364\365\366\367\370\371\372\373\374\375";
+	const char *pat64 = "aAbBcCdDeEfFgGhHiIjJkKlLmMnNoOpPqQrRsStTuUvVwWxXyYzZ+0129-";
+	const char *pat64u = "aAbBcCdDeEfFgGhHiIjJkKlLmMnNoOpPqQrRsStTuUvVwWxXyYzZ_0129-";
+	const char *pat128a = "aA-Aaahhh-Drink-mal-ein-J\344germeister-";
+	const char *pat128b = "aA-La-fl\373te-na\357ve-fran\347aise-est-retir\351-\340-Cr\350te";
+	const char *pat128c = "aAbBcCdDeEfFgGhHiIjJkKlLmMnNoOpPqQrRsStTuUvVwWxXyYzZ";
+	const char *pat128d = "aA0123456789\274\275\276\277"
+		"\300\301\302\303\304\305\306\307\310\311\312\313\314\315\316\317";
+	const char *pat128e="aA"
+			"\320\321\322\323\324\325\326\327\330\331\332\333\334\335\336\337"
+			"\340\341\342\343\344\345\346\347\350\351\352\353\354\355\356\357"
+			"\360\361\362\363\364\365\366\367\370\371\372\373\374\375";
 	int res;
 
 	/* Try Base128, starting very gently to not draw attention */
@@ -1767,11 +1718,11 @@ handshake_downenctest(int dns_fd, char trycodec)
 	int i;
 	int read;
 	char *s = DOWNCODECCHECK1;
-        int slen = DOWNCODECCHECK1_LEN;
+	int slen = DOWNCODECCHECK1_LEN;
 
-	for (i=0; running && i<3 ;i++) {
+	for (i = 0; running && i < 3; i++) {
 
-		send_downenctest(dns_fd, trycodec, 1, NULL, 0);
+		send_downenctest(dns_fd, trycodec, 1);
 
 		read = handshake_waitdns(dns_fd, in, sizeof(in), 'y', 'Y', i+1);
 
@@ -1858,7 +1809,7 @@ handshake_qtypetest(int dns_fd, int timeout)
 	char in[4096];
 	int read;
 	char *s = DOWNCODECCHECK1;
-        int slen = DOWNCODECCHECK1_LEN;
+	int slen = DOWNCODECCHECK1_LEN;
 	int trycodec;
 	int k;
 
@@ -1871,7 +1822,7 @@ handshake_qtypetest(int dns_fd, int timeout)
 	   byte values can be returned, which is needed for NULL/PRIVATE
 	   to work. */
 
-	send_downenctest(dns_fd, trycodec, 1, NULL, 0);
+	send_downenctest(dns_fd, trycodec, 1);
 
 	read = handshake_waitdns(dns_fd, in, sizeof(in), 'y', 'Y', timeout);
 
@@ -1987,7 +1938,7 @@ handshake_edns0_check(int dns_fd)
 	int i;
 	int read;
 	char *s = DOWNCODECCHECK1;
-        int slen = DOWNCODECCHECK1_LEN;
+	int slen = DOWNCODECCHECK1_LEN;
 	char trycodec;
 
 	if (do_qtype == T_NULL)
@@ -1995,9 +1946,9 @@ handshake_edns0_check(int dns_fd)
 	else
 		trycodec = 'T';
 
-	for (i=0; running && i<3 ;i++) {
+	for (i = 0; running && i < 3; i++) {
 
-		send_downenctest(dns_fd, trycodec, 1, NULL, 0);
+		send_downenctest(dns_fd, trycodec, 1);
 
 		read = handshake_waitdns(dns_fd, in, sizeof(in), 'y', 'Y', i+1);
 
@@ -2029,26 +1980,27 @@ handshake_edns0_check(int dns_fd)
 static void
 handshake_switch_codec(int dns_fd, int bits)
 {
+	char sw_codec[] = { 's', b32_5to8(userid), b32_5to8(bits), 0 };
 	char in[4096];
 	int i;
 	int read;
-	struct encoder *tempenc;
+	const struct encoder *tempenc;
 
 	if (bits == 5)
-		tempenc = get_base32_encoder();
+		tempenc = &base32_ops;
 	else if (bits == 6)
-		tempenc = get_base64_encoder();
+		tempenc = &base64_ops;
 	else if (bits == 26)	/* "2nd" 6 bits per byte, with underscore */
-		tempenc = get_base64u_encoder();
+		tempenc = &base64u_ops;
 	else if (bits == 7)
-		tempenc = get_base128_encoder();
+		tempenc = &base128_ops;
 	else return;
 
 	fprintf(stderr, "Switching upstream to codec %s\n", tempenc->name);
 
-	for (i=0; running && i<5 ;i++) {
+	for (i = 0; running && i < 5; i++) {
 
-		send_codec_switch(dns_fd, userid, bits);
+		send_handshake_query(dns_fd, sw_codec);
 
 		read = handshake_waitdns(dns_fd, in, sizeof(in), 's', 'S', i+1);
 
@@ -2083,6 +2035,7 @@ codec_revert:
 static void
 handshake_switch_downenc(int dns_fd)
 {
+	char sw_downenc[] = { 'o', b32_5to8(userid), tolower(downenc), 0 };
 	char in[4096];
 	int i;
 	int read;
@@ -2099,9 +2052,9 @@ handshake_switch_downenc(int dns_fd)
 		dname = "Raw";
 
 	fprintf(stderr, "Switching downstream to codec %s\n", dname);
-	for (i=0; running && i<5 ;i++) {
+	for (i = 0; running && i < 5; i++) {
 
-		send_downenc_switch(dns_fd, userid);
+		send_handshake_query(dns_fd, sw_downenc);
 
 		read = handshake_waitdns(dns_fd, in, sizeof(in), 'o', 'O', i+1);
 
@@ -2140,9 +2093,9 @@ handshake_try_lazy(int dns_fd)
 	int read;
 
 	fprintf(stderr, "Switching to lazy mode for low-latency\n");
-	for (i=0; running && i<5; i++) {
+	for (i = 0; running && i < 5 ;i++) {
 
-		send_lazy_switch(dns_fd, userid);
+		send_lazy_switch(dns_fd);
 
 		read = handshake_waitdns(dns_fd, in, sizeof(in), 'o', 'O', i+1);
 
@@ -2184,9 +2137,9 @@ handshake_lazyoff(int dns_fd)
 	int i;
 	int read;
 
-	for (i=0; running && i<5; i++) {
+	for (i = 0; running && i < 5; i++) {
 
-		send_lazy_switch(dns_fd, userid);
+		send_lazy_switch(dns_fd);
 
 		read = handshake_waitdns(dns_fd, in, sizeof(in), 'o', 'O', 1);
 
@@ -2290,7 +2243,7 @@ handshake_autoprobe_fragsize(int dns_fd)
 	fprintf(stderr, "Autoprobing max downstream fragment size... (skip with -m fragsize)\n");
 	while (running && range > 0 && (range >= 8 || max_fragsize < 300)) {
 		/* stop the slow probing early when we have enough bytes anyway */
-		for (i=0; running && i<3 ;i++) {
+		for (i = 0; running && i < 3; i++) {
 
 			send_fragsize_probe(dns_fd, proposed_fragsize);
 
@@ -2358,7 +2311,7 @@ handshake_set_fragsize(int dns_fd, int fragsize)
 	int read;
 
 	fprintf(stderr, "Setting downstream fragment size to max %d...\n", fragsize);
-	for (i=0; running && i<5 ;i++) {
+	for (i = 0; running && i < 5; i++) {
 
 		send_set_downstream_fragsize(dns_fd, fragsize);
 
