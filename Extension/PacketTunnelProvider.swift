@@ -23,6 +23,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // Try to start logging immediately
         try? StdioRedirect.shared.start()
         
+        NSLog("PacketTunnelProvider: startTunnel called") // System log backup
         print("PacketTunnelProvider: startTunnel called", to: &StdioRedirect.standardError)
         if let options = options {
             print("Options: \(options.keys.joined(separator: ", "))", to: &StdioRedirect.standardError)
@@ -58,7 +59,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 throw IodineError.internalError
             }
         } catch {
-            print("ERROR starting iodine: \(error.localizedDescription)", to: &StdioRedirect.standardError)
+            let errorMsg = "ERROR starting iodine: \(error.localizedDescription)"
+            print(errorMsg, to: &StdioRedirect.standardError)
+            NSLog("%@", errorMsg) // Fallback to system log
             completionHandler(error)
             return
         }

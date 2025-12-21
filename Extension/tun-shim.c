@@ -31,7 +31,8 @@ const CFStringRef kIodineSubnetMask = CFSTR("SubnetMask");
 
 int open_tun(const char *tun_device) {
     fprintf(stderr, "Unimplemented function open_tun() called!\n");
-    abort();
+    // abort(); // Do not abort, as it crashes the extension
+    return -1;
 }
 
 void close_tun(int tun_fd) {
