@@ -251,7 +251,9 @@ extension ViewController {
         
         manager.connection.stopVPNTunnel()
     }
-    logToUI("VPN connecting...")
+    
+    func vpnWillConnect(for manager: NEVPNManager) {
+        logToUI("VPN connecting...")
         DispatchQueue.main.async {
             self.vpnStartSwitch.isOn = true
             self.vpnStartSwitch.isEnabled = false
@@ -279,8 +281,6 @@ extension ViewController {
     
     func vpnDidDisconnect(for manager: NEVPNManager) {
         logToUI("VPN disconnected")
-    
-    func vpnDidDisconnect(for manager: NEVPNManager) {
         DispatchQueue.main.async {
             self.vpnStartSwitch.isOn = false
             self.vpnStartSwitch.isEnabled = true
