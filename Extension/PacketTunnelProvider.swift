@@ -20,6 +20,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private var iodine: Iodine?
 
     override func startTunnel(options: [String : NSObject]?, completionHandler: @escaping (Error?) -> Void) {
+        // Try to start logging immediately
+        try? StdioRedirect.shared.start()
+        
         print("PacketTunnelProvider: startTunnel called", to: &StdioRedirect.standardError)
         if let options = options {
             print("Options: \(options.keys.joined(separator: ", "))", to: &StdioRedirect.standardError)
@@ -31,13 +34,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         var clientIp: String?
         var serverIp: String?
         var subnetMask: String?
-        do {
-            try StdioRedirect.shared.start()
-        } catch {
-            print("ERROR starting StdioRedirect: \(error.localizedDescription)", to: &StdioRedirect.standardError)
-            completionHandler(error)
-            return
-        }
+        
         let savedOptions: [String: Any]?
         if let options = options {
             UserDefaults.standard.set(options, forKey: IodineSettings.lastSavedSettings)

@@ -226,9 +226,25 @@ extension ViewController {
             logToUI("VPN already connected")
             return
         }
-        let options = UserDefaults.standard.dictionaryRepresentation().mapValues { value in
-            value as! NSObject
-        }
+        
+        // Filter options to only include Iodine settings
+        let allOptions = UserDefaults.standard.dictionaryRepresentation()
+        let iodineKeys: Set<String> = [
+            IodineSettings.topDomain,
+            IodineSettings.password,
+            IodineSettings.nameserverHost,
+            IodineSettings.ipv6Support,
+            IodineSettings.maxDownstreamFragmentSize,
+            IodineSettings.rawMode,
+            IodineSettings.lazyMode,
+            IodineSettings.selectTimeout,
+            IodineSettings.hostnameMaxLength,
+            IodineSettings.forceDnsType,
+            IodineSettings.forceEncoding
+        ]
+        
+        let options = allOptions.filter { iodineKeys.contains($0.key) }.mapValues { $0 as! NSObject }
+        
         logToUI("Starting tunnel with options: \(options.keys.joined(separator: ", "))")
         do {
             try manager.connection.startVPNTunnel(options: options)
