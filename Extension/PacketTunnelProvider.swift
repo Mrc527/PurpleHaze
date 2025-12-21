@@ -127,7 +127,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             dnsServer = customDns
         }
         print("Network DNS: \(dnsServer)", to: &StdioRedirect.standardError)
-        config.dnsSettings = NEDNSSettings(servers: [dnsServer])
+        let dnsSettings = NEDNSSettings(servers: [dnsServer])
+        dnsSettings.matchDomains = [""] // Route all DNS queries through the tunnel
+        config.dnsSettings = dnsSettings
         let proxy = NEProxySettings()
         if let pacConfigUrl = options?[IodineSettings.pacConfigUrl] as? String, pacConfigUrl.count > 0 {
             proxy.autoProxyConfigurationEnabled = true
