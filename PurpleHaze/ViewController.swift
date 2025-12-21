@@ -73,11 +73,15 @@ class ViewController: UIViewController {
     }
     
     @IBAction func advancedSettingsPressed(_ sender: Any) {
-        _ = UIApplication.shared.openURL(URL(string: UIApplication.openSettingsURLString)!)
+        if let url = URL(string: UIApplication.openSettingsURLString) {
+            UIApplication.shared.open(url, options: [:], completionHandler: nil)
+        }
     }
     
     @IBAction func helpButtonPressed(_ sender: Any) {
-        _ = UIApplication.shared.openURL(URL(string: "https://github.com/osy/PurpleHaze")!)
+        if let url = URL(string: "https://github.com/osy/PurpleHaze") {
+            UIApplication.shared.open(url, options: [:], completionHandler: nil)
+        }
     }
     
     @IBAction func vpnStartSwitchChanged(_ sender: Any) {
@@ -85,6 +89,7 @@ class ViewController: UIViewController {
             clearLog()
             guard let topdomain = topDomainTextField.text, topdomain.count > 0 else {
                 showError(message: NSLocalizedString("You must specify a top domain.", comment: "ViewController"))
+                vpnStartSwitch.isOn = false
                 return
             }
             UserDefaults.standard.set(topdomain, forKey: IodineSettings.topDomain)
@@ -136,12 +141,10 @@ extension ViewController {
     }
     
     func setupVpn(with manager: NEVPNManager? = nil) {
-        DispatchQueue.global(qos: .utility).async {
-            if let manager = manager {
-                self.startExistingTunnel(with: manager)
-            } else {
-                self.createAndStartTunnel()
-            }
+        if let manager = manager {
+            startExistingTunnel(with: manager)
+        } else {
+            createAndStartTunnel()
         }
     }
     
