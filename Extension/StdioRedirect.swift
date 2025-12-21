@@ -40,14 +40,18 @@ public class StdioRedirect {
         standardOutput.fileHandleForReading.readabilityHandler = { handle in
             //let data = lastOutputLine.data(using: .utf8)! + handle.availableData
             //lastOutputLine = StdioRedirect.logData(data)
-            try! handle.availableData.append(fileURL: StdioRedirect.logUrl!)
+            if let logUrl = StdioRedirect.logUrl {
+                try? handle.availableData.append(fileURL: logUrl)
+            }
         }
         //var lastErrorLine = ""
         standardError = Pipe()
         standardError.fileHandleForReading.readabilityHandler = { handle in
             //let data = lastErrorLine.data(using: .utf8)! + handle.availableData
             //lastErrorLine = StdioRedirect.logData(data)
-            try! handle.availableData.append(fileURL: StdioRedirect.logUrl!)
+            if let logUrl = StdioRedirect.logUrl {
+                try? handle.availableData.append(fileURL: logUrl)
+            }
         }
     }
     

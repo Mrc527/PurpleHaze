@@ -57,9 +57,15 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             completionHandler(error)
             return
         }
-        print("Network server: \(serverIp!), client: \(clientIp!), subnet: \(subnetMask!)", to: &StdioRedirect.standardError)
-        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: serverIp!)
-        let ipv4 = NEIPv4Settings(addresses: [clientIp!], subnetMasks: [subnetMask!])
+        print("Network server: \(serverIp ?? "nil"), client: \(clientIp ?? "nil"), subnet: \(subnetMask ?? "nil")", to: &StdioRedirect.standardError)
+        guard let serverIp = serverIp, let clientIp = clientIp, let subnetMask = subnetMask else {
+            let error = IodineError.internalError
+            print("ERROR: Missing network configuration. Server: \(self.iodine?.tunDnsServer ?? "nil")", to: &StdioRedirect.standardError)
+            completionHandler(error)
+            return
+        }
+        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: serverIp)
+        let ipv4 = NEIPv4Settings(addresses: [clientIp], subnetMasks: [subnetMask])
         ipv4.includedRoutes = [.default()]
         settings.ipv4Settings = ipv4
         print("Network MTU: \(mtu ?? 0)", to: &StdioRedirect.standardError)
