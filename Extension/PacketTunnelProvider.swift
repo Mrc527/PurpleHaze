@@ -20,6 +20,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private var iodine: Iodine?
 
     override func startTunnel(options: [String : NSObject]?, completionHandler: @escaping (Error?) -> Void) {
+        print("PacketTunnelProvider: startTunnel called", to: &StdioRedirect.standardError)
+        if let options = options {
+            print("Options: \(options.keys.joined(separator: ", "))", to: &StdioRedirect.standardError)
+        } else {
+            print("Options: nil", to: &StdioRedirect.standardError)
+        }
+        
         var mtu: Int?
         var clientIp: String?
         var serverIp: String?
@@ -27,6 +34,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         do {
             try StdioRedirect.shared.start()
         } catch {
+            print("ERROR starting StdioRedirect: \(error.localizedDescription)", to: &StdioRedirect.standardError)
             completionHandler(error)
             return
         }
@@ -85,6 +93,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
     
     override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
+        print("PacketTunnelProvider: stopTunnel called with reason: \(reason.rawValue)", to: &StdioRedirect.standardError)
         iodine = nil
         StdioRedirect.shared.stop()
         completionHandler()

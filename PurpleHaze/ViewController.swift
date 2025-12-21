@@ -150,7 +150,7 @@ extension ViewController {
                 if !managers.isEmpty, let manager = managers.first {
                     await MainActor.run {
                         self.vpnManager = manager
-                        self.logToUI("VPN manager loaded successfully")
+                        self.logToUI("VPN manager loaded successfully. Protocol: \(manager.protocolConfiguration?.description ?? "nil")")
                     }
                 }
                 await MainActor.run {
@@ -164,6 +164,7 @@ extension ViewController {
                 }
             } catch {
                 await MainActor.run {
+                    self.logToUI("ERROR loading VPN manager: \(error.localizedDescription)")
                     self.vpnStartSwitch.isEnabled = true
                     self.showError(error)
                 }
@@ -228,17 +229,23 @@ extension ViewController {
         let options = UserDefaults.standard.dictionaryRepresentation().mapValues { value in
             value as! NSObject
         }
+        logToUI("Starting tunnel with options: \(options.keys.joined(separator: ", "))")
         do {
             try manager.connection.startVPNTunnel(options: options)
             logToUI("VPN tunnel start requested")
         } catch NEVPNError.configurationDisabled {
-            showError(message: NSLocalizedString("VPN has been disabled in settings or another VPN configuration is selected.", comment: "Main"))
+            let msg = NSLocalizedString("VPN has been disabled in settings or another VPN configuration is selected.", comment: "Main")
+            logToUI("ERROR: \(msg)")
+            showError(message: msg)
             return
         } catch NEVPNError.configurationInvalid {
-            showError(message: NSLocalizedString("VPN configuration is invalid.", comment: "Main"))
+            let msg = NSLocalizedString("VPN configuration is invalid.", comment: "Main")
+            logToUI("ERROR: \(msg)")
+            showError(message: msg)
             vpnManager = nil
             return
         } catch {
+            logToUI("ERROR starting tunnel: \(error.localizedDescription)")
             showError(error)
             return
         }
@@ -335,10 +342,6 @@ extension ViewController {
                     self.logTextView.text += lines
                     self.logTextView.scrollToBottom()
                 }
-            }
-        } else {
-            DispatchQueue.main.async {
-                self.logTextView.text = ""
             }
         }
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.0, execute: refreshLog)

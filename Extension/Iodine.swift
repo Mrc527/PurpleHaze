@@ -46,35 +46,58 @@ final public class Iodine: NSObject {
     private var nameserver = sockaddr_storage()
     
     private var defaultNameserver: sockaddr_storage? {
-        let statePtr = UnsafeMutablePointer<__res_9_state>.allocate(capacity: 1)
-        defer {
-            statePtr.deallocate()
+        func getSystemDNS() -> sockaddr_storage? {
+            let statePtr = UnsafeMutablePointer<__res_9_state>.allocate(capacity: 1)
+            defer {
+                statePtr.deallocate()
+            }
+            statePtr.initialize(to: __res_9_state())
+            defer {
+                statePtr.deinitialize(count: 1)
+            }
+            var servers = [res_9_sockaddr_union](repeating: res_9_sockaddr_union(), count: Int(NI_MAXSERV))
+            if res_9_ninit(statePtr) != 0 {
+                print("ERROR: res_9_ninit failed", to: &StdioRedirect.standardError)
+                return nil
+            }
+            defer {
+                res_9_nclose(statePtr)
+            }
+            let count = res_9_getservers(statePtr, &servers, NI_MAXSERV)
+            print("Found \(count) DNS servers", to: &StdioRedirect.standardError)
+            guard count > 0 else {
+                return nil
+            }
+            var serversList = servers
+            serversList.removeLast(Int(NI_MAXSERV - count))
+            
+            guard var server = serversList.first(where: { server in
+                self.ipv6Support || server.sin6.sin6_family != AF_INET6
+            }) else {
+                return nil
+            }
+            var result = sockaddr_storage()
+            withUnsafePointer(to: &server) { addr in
+                let ptr = UnsafeRawPointer(addr).assumingMemoryBound(to: sockaddr_storage.self)
+                result = ptr.pointee
+            }
+            return result
         }
-        statePtr.initialize(to: __res_9_state())
-        defer {
-            statePtr.deinitialize(count: 1)
+
+        if let systemDNS = getSystemDNS() {
+            return systemDNS
         }
-        var servers = [res_9_sockaddr_union](repeating: res_9_sockaddr_union(), count: Int(NI_MAXSERV))
-        res_9_ninit(statePtr)
-        defer {
-            res_9_nclose(statePtr)
+        
+        print("WARNING: System DNS not found. Fallback to 8.8.8.8", to: &StdioRedirect.standardError)
+        var storage = sockaddr_storage()
+        let host = "8.8.8.8"
+        if let hostPtr = host.unsafeAllocate() {
+            defer { hostPtr.deallocate() }
+            if get_addr(hostPtr, 53, AF_INET, 0, &storage) > 0 {
+                return storage
+            }
         }
-        let count = res_9_getservers(statePtr, &servers, NI_MAXSERV)
-        guard count > 0 else {
-            return nil
-        }
-        servers.removeLast(Int(NI_MAXSERV - count))
-        var result = sockaddr_storage()
-        guard var server = servers.first(where: { server in
-            self.ipv6Support || server.sin6.sin6_family != AF_INET6
-        }) else {
-            return nil
-        }
-        withUnsafePointer(to: &server) { addr in
-            let ptr = UnsafeRawPointer(addr).assumingMemoryBound(to: sockaddr_storage.self)
-            result = ptr.pointee
-        }
-        return result
+        return nil
     }
     
     public var tunDnsServer: String? {
@@ -161,17 +184,20 @@ final public class Iodine: NSObject {
     }
     
     private func setup() throws {
+        print("Iodine: setup called", to: &StdioRedirect.standardError)
         guard !isSetupComplete else {
             throw IodineError.internalError
         }
         
         if let forceDnsType = forceDnsType {
+            print("Iodine: Setting forceDnsType to \(forceDnsType)", to: &StdioRedirect.standardError)
             let forceDnsTypePtr = forceDnsType.unsafeAllocate()!
             client_set_qtype(forceDnsTypePtr)
             forceDnsTypePtr.deallocate()
         }
         
         if let forceEncoding = forceEncoding {
+            print("Iodine: Setting forceEncoding to \(forceEncoding)", to: &StdioRedirect.standardError)
             let forceEncodingPtr = forceEncoding.unsafeAllocate()
             client_set_qtype(forceEncodingPtr)
             forceEncodingPtr?.deallocate()
@@ -179,6 +205,7 @@ final public class Iodine: NSObject {
         
         let family = ipv6Support ? AF_UNSPEC : AF_INET
         if let host = nameserverHost {
+            print("Iodine: Using custom nameserver host: \(host)", to: &StdioRedirect.standardError)
             let hostPtr = host.unsafeAllocate()!
             let len = get_addr(hostPtr, DNS_PORT, family, 0, &nameserver)
             hostPtr.deallocate()
@@ -187,6 +214,7 @@ final public class Iodine: NSObject {
             }
             client_set_nameserver(&nameserver, len)
         } else {
+            print("Iodine: Using default nameserver", to: &StdioRedirect.standardError)
             guard let defaultNameserver = defaultNameserver else {
                 throw IodineError.defaultDnsNotFound
             }
@@ -197,6 +225,7 @@ final public class Iodine: NSObject {
         guard let topdomain = topDomain else {
             throw IodineError.invalidTopdomain()
         }
+        print("Iodine: Top domain is \(topdomain)", to: &StdioRedirect.standardError)
         var errormsg: UnsafeMutablePointer<CChar>? = nil
         if let topDomainPtr = topDomainPtr {
             topDomainPtr.deallocate()
@@ -224,6 +253,7 @@ final public class Iodine: NSObject {
     }
     
     public func start() throws {
+        print("Iodine: start called", to: &StdioRedirect.standardError)
         guard !isRunning else {
             throw IodineError.internalError
         }
@@ -245,12 +275,14 @@ final public class Iodine: NSObject {
         print("Connecting to DNS...", to: &StdioRedirect.standardError)
         dnsSocket = open_dns_from_host(nil, 0, Int32(nameserver.ss_family), AI_PASSIVE)
         guard dnsSocket >= 0 else {
+            print("ERROR: open_dns_from_host failed", to: &StdioRedirect.standardError)
             stop()
             throw IodineError.dnsOpenFailed
         }
         
         print("Opening streams...", to: &StdioRedirect.standardError)
         guard openStream() else {
+            print("ERROR: openStream failed", to: &StdioRedirect.standardError)
             stop()
             throw IodineError.internalError
         }
@@ -258,6 +290,7 @@ final public class Iodine: NSObject {
         let dnsHostname = String(cString: format_addr(&nameserver, Int32(nameserver.ss_len)))
         print("Sending DNS queries for \(topDomain ?? "(null)") to \(dnsHostname)", to: &StdioRedirect.standardError);
         guard client_handshake(dnsSocket, rawMode ? 1 : 0, maxDownstreamFragmentSize > 0 ? 0 : 1, Int32(maxDownstreamFragmentSize)) == 0 else {
+            print("ERROR: client_handshake failed", to: &StdioRedirect.standardError)
             stop()
             throw IodineError.handshakeFailed
         }
