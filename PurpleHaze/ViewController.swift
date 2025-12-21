@@ -212,10 +212,7 @@ extension ViewController {
                     self.initVpn(onExistingManager: self.startExistingTunnel)
                 }
             } catch {
-                await MainActor.run {
-                    self.showError(error)
-                }
-            }
+    func startExistingTunnel(with manager: NEVPNManager) {
         logToUI("Starting VPN tunnel...")
         if manager.connection.status == .connected {
             logToUI("VPN already connected")
@@ -226,11 +223,7 @@ extension ViewController {
         }
         do {
             try manager.connection.startVPNTunnel(options: options)
-            logToUI("VPN tunnel start requested"on().mapValues { value in
-            value as! NSObject
-        }
-        do {
-            try manager.connection.startVPNTunnel(options: options)
+            logToUI("VPN tunnel start requested")
         } catch NEVPNError.configurationDisabled {
             showError(message: NSLocalizedString("VPN has been disabled in settings or another VPN configuration is selected.", comment: "Main"))
             return
