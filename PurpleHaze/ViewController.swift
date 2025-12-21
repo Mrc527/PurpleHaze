@@ -111,18 +111,26 @@ extension ViewController {
         DispatchQueue.main.async {
             self.vpnStartSwitch.isEnabled = false
         }
-        NETunnelProviderManager.loadAllFromPreferences { (managers, error) in
-            if !(managers?.isEmpty ?? true), let manager = managers?[0] {
-                self.vpnManager = manager
-            }
-            DispatchQueue.main.async {
-                self.vpnStartSwitch.isOn = self.vpnManager?.connection.status == .connected
-                self.vpnStartSwitch.isEnabled = true
-            }
-            if error != nil {
-                self.showError(error)
-            } else if let manager = self.vpnManager {
-                onExistingManager(manager)
+        Task {
+            do {
+                let managers = try await NETunnelProviderManager.loadAllFromPreferences()
+                if !managers.isEmpty, let manager = managers.first {
+                    await MainActor.run {
+                        self.vpnManager = manager
+                    }
+                }
+                await MainActor.run {
+                    self.vpnStartSwitch.isOn = self.vpnManager?.connection.status == .connected
+                    self.vpnStartSwitch.isEnabled = true
+                }
+                if let manager = self.vpnManager {
+                    onExistingManager(manager)
+                }
+            } catch {
+                await MainActor.run {
+                    self.vpnStartSwitch.isEnabled = true
+                    self.showError(error)
+                }
             }
         }
     }
@@ -138,24 +146,24 @@ extension ViewController {
     }
     
     func createAndStartTunnel() {
-        let manager = NETunnelProviderManager()
-        manager.localizedDescription = NSLocalizedString("Iodine DNS Tunnel", comment: "Main")
-        let proto = NETunnelProviderProtocol()
-        proto.providerBundleIdentifier = tunnelBundleId
-        proto.serverAddress = ""
-        manager.protocolConfiguration = proto
-        manager.isEnabled = true
-        let lock = DispatchSemaphore(value: 0)
-        var error: Error?
-        manager.saveToPreferences { err in
-            error = err
-            lock.signal()
-        }
-        lock.wait()
-        if let err = error {
-            showError(err)
-        } else {
-            initVpn(onExistingManager: startExistingTunnel)
+        Task {
+            let manager = NETunnelProviderManager()
+            manager.localizedDescription = NSLocalizedString("Iodine DNS Tunnel", comment: "Main")
+            let proto = NETunnelProviderProtocol()
+            proto.providerBundleIdentifier = tunnelBundleId
+            proto.serverAddress = "255.255.255.255"
+            manager.protocolConfiguration = proto
+            manager.isEnabled = true
+            do {
+                try await manager.saveToPreferences()
+                await MainActor.run {
+                    self.initVpn(onExistingManager: self.startExistingTunnel)
+                }
+            } catch {
+                await MainActor.run {
+                    self.showError(error)
+                }
+            }
         }
     }
     

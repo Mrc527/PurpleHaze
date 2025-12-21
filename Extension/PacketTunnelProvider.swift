@@ -58,9 +58,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
         print("Network server: \(serverIp!), client: \(clientIp!), subnet: \(subnetMask!)", to: &StdioRedirect.standardError)
-        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "255.255.255.255")
+        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: serverIp!)
         let ipv4 = NEIPv4Settings(addresses: [clientIp!], subnetMasks: [subnetMask!])
-        ipv4.includedRoutes = [.default(), .init(destinationAddress: serverIp!, subnetMask: subnetMask!)]
+        ipv4.includedRoutes = [.default()]
         settings.ipv4Settings = ipv4
         print("Network MTU: \(mtu ?? 0)", to: &StdioRedirect.standardError)
         if let mtu = mtu {
