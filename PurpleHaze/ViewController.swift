@@ -54,13 +54,34 @@ class ViewController: UIViewController {
         super.viewDidLoad()
         topDomainTextField.text = UserDefaults.standard.string(forKey: IodineSettings.topDomain)
         passwordTextField.text = UserDefaults.standard.string(forKey: IodineSettings.password)
+        
+        // 配置日志视图样式
+        logTextView.backgroundColor = UIColor.systemGray6
+        logTextView.layer.borderColor = UIColor.systemGray4.cgColor
+        logTextView.layer.borderWidth = 1.0
+        logTextView.layer.cornerRadius = 8.0
+        logTextView.font = UIFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+        logTextView.textColor = UIColor.label
+        logTextView.isEditable = false
+        
+        logToUI("App started")
         initVpn()
         refreshLog()
     }
     
-    func showError(message: String?) {
+    func logToUI(_ message: String) {
+        let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+        let logMessage = "[\(timestamp)] \(message)\n"
         DispatchQueue.main.async {
-            let alertMessage = message ?? NSLocalizedString("An error has occurred.", comment: "Main")
+            self.logTextView.text += logMessage
+            self.logTextView.scrollToBottom()
+        }
+    }
+    
+    func showError(message: String?) {
+        let alertMessage = message ?? NSLocalizedString("An error has occurred.", comment: "Main")
+        logToUI("ERROR: \(alertMessage)")
+        DispatchQueue.main.async {
             let alert = UIAlertController(title: nil, message: alertMessage, preferredStyle: .alert)
             alert.addAction(UIAlertAction(title: NSLocalizedString("OK", comment: "Main"), style: .default, handler: nil))
             self.present(alert, animated: true)
@@ -87,15 +108,18 @@ class ViewController: UIViewController {
     @IBAction func vpnStartSwitchChanged(_ sender: Any) {
         if vpnStartSwitch.isOn {
             clearLog()
+            logToUI("VPN switch turned ON")
             guard let topdomain = topDomainTextField.text, topdomain.count > 0 else {
                 showError(message: NSLocalizedString("You must specify a top domain.", comment: "ViewController"))
                 vpnStartSwitch.isOn = false
                 return
             }
+            logToUI("Top domain: \(topdomain)")
             UserDefaults.standard.set(topdomain, forKey: IodineSettings.topDomain)
             UserDefaults.standard.set(passwordTextField.text, forKey: IodineSettings.password)
             setupVpn(with: vpnManager)
         } else {
+            logToUI("VPN switch turned OFF")
             guard let vpnManager = vpnManager else {
                 return
             }
@@ -113,19 +137,26 @@ extension ViewController {
     }
     
     func initVpn(onExistingManager: @escaping (NEVPNManager) -> () = { _ in }) {
+        logToUI("Initializing VPN manager...")
         DispatchQueue.main.async {
             self.vpnStartSwitch.isEnabled = false
         }
         Task {
             do {
                 let managers = try await NETunnelProviderManager.loadAllFromPreferences()
+                await MainActor.run {
+                    self.logToUI("Found \(managers.count) VPN configuration(s)")
+                }
                 if !managers.isEmpty, let manager = managers.first {
                     await MainActor.run {
                         self.vpnManager = manager
+                        self.logToUI("VPN manager loaded successfully")
                     }
                 }
                 await MainActor.run {
-                    self.vpnStartSwitch.isOn = self.vpnManager?.connection.status == .connected
+                    let status = self.vpnManager?.connection.status ?? .invalid
+                    self.logToUI("VPN status: \(self.statusString(status))")
+                    self.vpnStartSwitch.isOn = status == .connected
                     self.vpnStartSwitch.isEnabled = true
                 }
                 if let manager = self.vpnManager {
@@ -140,10 +171,24 @@ extension ViewController {
         }
     }
     
+    func statusString(_ status: NEVPNStatus) -> String {
+        switch status {
+        case .invalid: return "Invalid"
+        case .disconnected: return "Disconnected"
+        case .connecting: return "Connecting"
+        case .connected: return "Connected"
+        case .reasserting: return "Reasserting"
+        case .disconnecting: return "Disconnecting"
+        @unknown default: return "Unknown"
+        }
+    }
+    
     func setupVpn(with manager: NEVPNManager? = nil) {
         if let manager = manager {
+            logToUI("Using existing VPN configuration")
             startExistingTunnel(with: manager)
         } else {
+            logToUI("Creating new VPN configuration")
             createAndStartTunnel()
         }
     }
@@ -157,9 +202,13 @@ extension ViewController {
             proto.serverAddress = "255.255.255.255"
             manager.protocolConfiguration = proto
             manager.isEnabled = true
+            await MainActor.run {
+                self.logToUI("Saving VPN configuration...")
+            }
             do {
                 try await manager.saveToPreferences()
                 await MainActor.run {
+                    self.logToUI("VPN configuration saved")
                     self.initVpn(onExistingManager: self.startExistingTunnel)
                 }
             } catch {
@@ -167,15 +216,17 @@ extension ViewController {
                     self.showError(error)
                 }
             }
-        }
-    }
-    
-    func startExistingTunnel(with manager: NEVPNManager) {
+        logToUI("Starting VPN tunnel...")
         if manager.connection.status == .connected {
-            // Connection already established, nothing to do here
+            logToUI("VPN already connected")
             return
         }
         let options = UserDefaults.standard.dictionaryRepresentation().mapValues { value in
+            value as! NSObject
+        }
+        do {
+            try manager.connection.startVPNTunnel(options: options)
+            logToUI("VPN tunnel start requested"on().mapValues { value in
             value as! NSObject
         }
         do {
@@ -200,8 +251,7 @@ extension ViewController {
         
         manager.connection.stopVPNTunnel()
     }
-    
-    func vpnWillConnect(for manager: NEVPNManager) {
+    logToUI("VPN connecting...")
         DispatchQueue.main.async {
             self.vpnStartSwitch.isOn = true
             self.vpnStartSwitch.isEnabled = false
@@ -210,6 +260,7 @@ extension ViewController {
     }
     
     func vpnDidConnect(for manager: NEVPNManager) {
+        logToUI("VPN connected successfully!")
         DispatchQueue.main.async {
             self.vpnStartSwitch.isOn = true
             self.vpnStartSwitch.isEnabled = true
@@ -218,12 +269,16 @@ extension ViewController {
     }
     
     func vpnWillDisconnect(for manager: NEVPNManager) {
+        logToUI("VPN disconnecting...")
         DispatchQueue.main.async {
             self.vpnStartSwitch.isOn = false
             self.vpnStartSwitch.isEnabled = false
             self.activityIndicator.startAnimating()
         }
     }
+    
+    func vpnDidDisconnect(for manager: NEVPNManager) {
+        logToUI("VPN disconnected")
     
     func vpnDidDisconnect(for manager: NEVPNManager) {
         DispatchQueue.main.async {
