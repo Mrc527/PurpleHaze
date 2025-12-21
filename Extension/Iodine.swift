@@ -48,11 +48,17 @@ final public class Iodine: NSObject {
     private var defaultNameserver: sockaddr_storage? {
         var state = __res_9_state()
         var servers = [res_9_sockaddr_union](repeating: res_9_sockaddr_union(), count: Int(NI_MAXSERV))
-        res_9_ninit(&state)
-        defer {
-            res_9_nclose(&state)
+        withUnsafeMutablePointer(to: &state) { statePtr in
+            res_9_ninit(statePtr)
         }
-        let count = res_9_getservers(&state, &servers, NI_MAXSERV)
+        defer {
+            withUnsafeMutablePointer(to: &state) { statePtr in
+                res_9_nclose(statePtr)
+            }
+        }
+        let count = withUnsafeMutablePointer(to: &state) { statePtr in
+            res_9_getservers(statePtr, &servers, NI_MAXSERV)
+        }
         guard count > 0 else {
             return nil
         }

@@ -35,7 +35,7 @@ jobs:
           xcodebuild -version
           xcodebuild -showsdks
       - name: Build
-        run: xcodebuild archive -archivePath PurpleHaze -scheme "Purple Haze" -configuration Release CODE_SIGNING_ALLOWED=NO
+        run: xcodebuild archive -archivePath PurpleHaze -scheme "Purple Haze" -configuration Release CODE_SIGNING_ALLOWED=NO IPHONEOS_DEPLOYMENT_TARGET=14.0
       - name: Fake Sign
         run: |
           sed 's/$(PRODUCT_BUNDLE_PREFIX:default=com.osy86)/com.osy86/g' PurpleHaze/PurpleHaze.entitlements > PurpleHaze.entitlements
