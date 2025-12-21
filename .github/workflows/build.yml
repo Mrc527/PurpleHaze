@@ -22,12 +22,18 @@ on:
 jobs:
   build-ios:
     name: Build IPA
-    runs-on: macos-11
+    runs-on: macos-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
         with:
           submodules: recursive
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_26.0.app/Contents/Developer
+      - name: Show Xcode and SDK Info
+        run: |
+          xcodebuild -version
+          xcodebuild -showsdks
       - name: Build
         run: xcodebuild archive -archivePath PurpleHaze -scheme "Purple Haze" -configuration Release CODE_SIGNING_ALLOWED=NO
       - name: Fake Sign
@@ -39,18 +45,18 @@ jobs:
       - name: Compress
         run: tar cf PurpleHaze.xcarchive.tgz PurpleHaze.xcarchive
       - name: Upload
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4
         with:
           name: PurpleHaze
           path: PurpleHaze.xcarchive.tgz
   package-ipa:
     name: Package IPA
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     needs: build-ios
     if: github.event_name == 'release' || github.event.inputs.test_release == 'true'
     steps:
       - name: Download Artifact
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v4
         with:
           name: PurpleHaze
       - name: Package IPA
@@ -60,18 +66,15 @@ jobs:
           zip -r PurpleHaze.ipa Payload -x "._*" -x ".DS_Store" -x "__MACOSX"
       - name: Upload Release Asset
         if: github.event_name == 'release'
-        uses: actions/upload-release-asset@v1.0.2
+        uses: softprops/action-gh-release@v1
+        with:
+          files: PurpleHaze.ipa
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: PurpleHaze.ipa
-          asset_name: PurpleHaze.ipa
-          asset_content_type: application/octet-stream
       - name: Send Dispatch Event
         if: github.event_name == 'release'
         continue-on-error: true
-        uses: peter-evans/repository-dispatch@v1
+        uses: peter-evans/repository-dispatch@v2
         with:
           token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
           repository: ${{ secrets.DISPATCH_ALTSTORE_REPO_NAME }}
