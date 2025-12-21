@@ -212,6 +212,13 @@ extension ViewController {
                     self.initVpn(onExistingManager: self.startExistingTunnel)
                 }
             } catch {
+                await MainActor.run {
+                    self.showError(error)
+                }
+            }
+        }
+    }
+    
     func startExistingTunnel(with manager: NEVPNManager) {
         logToUI("Starting VPN tunnel...")
         if manager.connection.status == .connected {
