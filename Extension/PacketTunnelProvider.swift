@@ -38,20 +38,28 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         
         let savedOptions: [String: Any]?
         if let options = options {
-            UserDefaults.standard.set(options, forKey: IodineSettings.lastSavedSettings)
-            savedOptions = options
+            let publicOptions = options.filter { $0.key != IodineSettings.password }
+            UserDefaults.standard.set(publicOptions, forKey: IodineSettings.lastSavedSettings)
+            savedOptions = publicOptions
         } else {
-            savedOptions = UserDefaults.standard.dictionary(forKey: IodineSettings.lastSavedSettings)
+            savedOptions = UserDefaults.standard.dictionary(forKey: IodineSettings.lastSavedSettings)?.filter {
+                $0.key != IodineSettings.password
+            }
+            UserDefaults.standard.set(savedOptions, forKey: IodineSettings.lastSavedSettings)
         }
         iodine = Iodine(options: savedOptions)
         iodine!.delegate = self
-        NotificationCenter.default.addObserver(forName: IodineSetMTUNotification as NSNotification.Name, object: nil, queue: nil) { notification in
+        let mtuObserver = NotificationCenter.default.addObserver(forName: IodineSetMTUNotification as NSNotification.Name, object: nil, queue: nil) { notification in
             mtu = notification.userInfo![kIodineMTU] as? Int
         }
-        NotificationCenter.default.addObserver(forName: IodineSetIPNotification as NSNotification.Name, object: nil, queue: nil) { notification in
+        let ipObserver = NotificationCenter.default.addObserver(forName: IodineSetIPNotification as NSNotification.Name, object: nil, queue: nil) { notification in
             clientIp = notification.userInfo![kIodineClientIP] as? String
             serverIp = notification.userInfo![kIodineServerIP] as? String
             subnetMask = notification.userInfo![kIodineSubnetMask] as? String
+        }
+        defer {
+            NotificationCenter.default.removeObserver(mtuObserver)
+            NotificationCenter.default.removeObserver(ipObserver)
         }
         do {
             try iodine!.start()
@@ -59,6 +67,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 throw IodineError.internalError
             }
         } catch {
+            iodine?.stop()
+            iodine = nil
             let errorMsg = "ERROR starting iodine: \(error.localizedDescription)"
             print(errorMsg, to: &StdioRedirect.standardError)
             NSLog("%@", errorMsg) // Fallback to system log
@@ -76,6 +86,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let ipv4 = NEIPv4Settings(addresses: [clientIp], subnetMasks: [subnetMask])
         ipv4.includedRoutes = [.default()]
         settings.ipv4Settings = ipv4
+        // iodine carries IPv4 only; capture and discard IPv6 instead of bypassing the tunnel.
+        let ipv6 = NEIPv6Settings(addresses: ["fd00::2"], networkPrefixLengths: [128])
+        ipv6.includedRoutes = [.default()]
+        settings.ipv6Settings = ipv6
         print("Network MTU: \(mtu ?? 0)", to: &StdioRedirect.standardError)
         if let mtu = mtu {
             settings.mtu = NSNumber(value: mtu)
@@ -86,6 +100,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 print("Tunnel started successfully!", to: &StdioRedirect.standardError)
                 self.readPackets()
             } else {
+                self.iodine?.stop()
+                self.iodine = nil
                 print("ERROR in setTunnelNetworkSettings: \(error?.localizedDescription ?? "(unknown)")", to: &StdioRedirect.standardError)
             }
             completionHandler(error)
@@ -94,26 +110,19 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     
     override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
         print("PacketTunnelProvider: stopTunnel called with reason: \(reason.rawValue)", to: &StdioRedirect.standardError)
+        iodine?.stop()
         iodine = nil
         StdioRedirect.shared.stop()
         completionHandler()
     }
     
     override func sleep(completionHandler: @escaping () -> Void) {
-        iodine?.stop()
         completionHandler()
     }
-    
-    override func wake() {
-        do {
-            try iodine?.start()
-        } catch {
-            cancelTunnelWithError(error)
-        }
-    }
-    
+
     private func readPackets() {
-        packetFlow.readPackets { packets, protocols in
+        packetFlow.readPackets { [weak self] packets, protocols in
+            guard let self = self, self.iodine != nil else { return }
             for (i, packet) in packets.enumerated() {
                 self.iodine?.writeData(packet, family: protocols[i].int32Value)
             }
@@ -130,6 +139,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let dnsSettings = NEDNSSettings(servers: [dnsServer])
         dnsSettings.matchDomains = [""] // Route all DNS queries through the tunnel
         config.dnsSettings = dnsSettings
+        // Full proxy mode converts every tunneled IPv4 TCP/UDP flow on the server.
+        // Provider-created proxy sockets here would bypass packetFlow.
+        if options?[IodineSettings.serverProxy] as? Bool == true { return }
         let proxy = NEProxySettings()
         if let pacConfigUrl = options?[IodineSettings.pacConfigUrl] as? String, pacConfigUrl.count > 0 {
             proxy.autoProxyConfigurationEnabled = true

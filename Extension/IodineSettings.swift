@@ -19,7 +19,9 @@ public final class IodineSettings {
     public static let ipv6Support = "IPv6Support"
     public static let nameserverHost = "NameserverHost"
     public static let topDomain = "TopDomain"
-    public static let password = "Password"
+    public static let password = "Password" // Migration only; never persist new secrets here.
+    public static let encrypted = "Encrypted"
+    public static let serverProxy = "ServerProxy"
     public static let maxDownstreamFragmentSize = "MaxDownstreamFragmentSize"
     public static let rawMode = "RawMode"
     public static let lazyMode = "LazyMode"

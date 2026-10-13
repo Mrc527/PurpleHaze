@@ -36,7 +36,7 @@ int open_tun(const char *tun_device) {
 }
 
 void close_tun(int tun_fd) {
-    if (tun_fd > 0) {
+    if (tun_fd >= 0) {
         close(tun_fd);
     }
 }
@@ -64,7 +64,8 @@ static void AddStringValue(CFMutableDictionaryRef dictionary, const CFStringRef 
 }
 
 int tun_setip(const char *ip, const char *other_ip, int netbits) {
-    int netmask;
+    uint32_t netmask;
+    if (netbits < 1 || netbits > 32) return -1;
     struct in_addr net;
     
     netmask = 0;

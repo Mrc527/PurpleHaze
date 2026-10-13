@@ -20,7 +20,8 @@ final public class Iodine: NSObject {
     public private(set) var ipv6Support: Bool = true
     public private(set) var nameserverHost: String? = nil
     public private(set) var topDomain: String? = nil
-    public private(set) var password: String? = nil
+    public private(set) var encrypted: Bool = false
+    public private(set) var serverProxy: Bool = false
     public private(set) var maxDownstreamFragmentSize: Int = 0
     public private(set) var rawMode: Bool = true
     public private(set) var lazyMode: Bool = true
@@ -35,10 +36,9 @@ final public class Iodine: NSObject {
     private var networkExtensionToIodineSocket: Int32 = -1
     private var dnsSocket: Int32 = -1
     private var topDomainPtr: UnsafeMutablePointer<CChar>?
-    private var passwordPtr: UnsafeMutablePointer<CChar>?
     
-    private var inputStream: InputStream?
-    private var outputStream: OutputStream?
+    private var packetSource: DispatchSourceRead?
+    private let packetQueue = DispatchQueue(label: "Iodine.packets")
     
     private var runQueue: DispatchQueue?
     private var isSetupComplete: Bool = false
@@ -78,8 +78,9 @@ final public class Iodine: NSObject {
             }
             var result = sockaddr_storage()
             withUnsafePointer(to: &server) { addr in
-                let ptr = UnsafeRawPointer(addr).assumingMemoryBound(to: sockaddr_storage.self)
-                result = ptr.pointee
+                withUnsafeMutableBytes(of: &result) { target in
+                    target.copyBytes(from: UnsafeRawBufferPointer(start: addr, count: MemoryLayout<res_9_sockaddr_union>.size))
+                }
             }
             return result
         }
@@ -93,7 +94,8 @@ final public class Iodine: NSObject {
         let host = "8.8.8.8"
         if let hostPtr = host.unsafeAllocate() {
             defer { hostPtr.deallocate() }
-            if get_addr(hostPtr, 53, AF_INET, 0, &storage) > 0 {
+            var len: socklen_t = 0
+            if get_addr(hostPtr, 53, AF_INET, 0, &storage, &len) == 0 {
                 return storage
             }
         }
@@ -104,7 +106,7 @@ final public class Iodine: NSObject {
         guard var defaultNameserver = defaultNameserver else {
             return nil
         }
-        let dnsHostname = String(cString: format_addr(&defaultNameserver, Int32(defaultNameserver.ss_len)))
+        let dnsHostname = String(cString: format_addr(&defaultNameserver, socklen_t(defaultNameserver.ss_len)))
         return dnsHostname
     }
     
@@ -122,9 +124,8 @@ final public class Iodine: NSObject {
         if let topDomain = options[IodineSettings.topDomain] as? String, topDomain.count > 0 {
             self.topDomain = topDomain
         }
-        if let password = options[IodineSettings.password] as? String, password.count > 0 {
-            self.password = String(password.prefix(32))
-        }
+        encrypted = options[IodineSettings.encrypted] as? Bool ?? false
+        serverProxy = options[IodineSettings.serverProxy] as? Bool ?? false
         let maxDownstreamFragmentSize: Int?
         if let maxDownstreamFragmentSizeString = options[IodineSettings.maxDownstreamFragmentSize] as? String, maxDownstreamFragmentSizeString.count > 0 {
             maxDownstreamFragmentSize = Int(maxDownstreamFragmentSizeString)
@@ -199,7 +200,7 @@ final public class Iodine: NSObject {
         if let forceEncoding = forceEncoding {
             print("Iodine: Setting forceEncoding to \(forceEncoding)", to: &StdioRedirect.standardError)
             let forceEncodingPtr = forceEncoding.unsafeAllocate()
-            client_set_qtype(forceEncodingPtr)
+            client_set_downenc(forceEncodingPtr)
             forceEncodingPtr?.deallocate()
         }
         
@@ -207,12 +208,13 @@ final public class Iodine: NSObject {
         if let host = nameserverHost {
             print("Iodine: Using custom nameserver host: \(host)", to: &StdioRedirect.standardError)
             let hostPtr = host.unsafeAllocate()!
-            let len = get_addr(hostPtr, DNS_PORT, family, 0, &nameserver)
+            var len: socklen_t = 0
+            let result = get_addr(hostPtr, DNS_PORT, family, 0, &nameserver, &len)
             hostPtr.deallocate()
-            guard len > 0 else {
+            guard result == 0 else {
                 throw IodineError.invalidNameserverHost
             }
-            client_set_nameserver(&nameserver, len)
+            client_set_nameserver(&nameserver, Int32(len))
         } else {
             print("Iodine: Using default nameserver", to: &StdioRedirect.standardError)
             guard let defaultNameserver = defaultNameserver else {
@@ -240,14 +242,26 @@ final public class Iodine: NSObject {
         client_set_lazymode(lazyMode ? 1 : 0)
         client_set_hostname_maxlen(Int32(hostnameMaxLength))
         
-        if let password = password {
-            if let passwordPtr = passwordPtr {
-                passwordPtr.deallocate()
+        guard !serverProxy || encrypted else { throw IodineError.invalidCredentials }
+        client_set_proxy(serverProxy ? 1 : 0)
+        if encrypted {
+            guard var key = try Credentials.read(Credentials.sharedKey), key.count == 32 else {
+                throw IodineError.invalidCredentials
             }
-            passwordPtr = password.unsafeAllocate(capacity: 33)
-            client_set_password(passwordPtr)
+            defer { key.resetBytes(in: 0..<key.count) }
+            let ok = key.withUnsafeBytes { bytes in
+                client_set_key(bytes.bindMemory(to: UInt8.self).baseAddress, bytes.count)
+            }
+            guard ok == 1 else { throw IodineError.invalidCredentials }
+        } else {
+            guard var data = try Credentials.read(Credentials.password), data.count <= 32,
+                  let password = String(data: data, encoding: .utf8) else {
+                throw IodineError.invalidCredentials
+            }
+            defer { data.resetBytes(in: 0..<data.count) }
+            password.withCString { client_set_password($0) }
         }
-        
+
         runQueue = DispatchQueue(label: "Iodine")
         isSetupComplete = true
     }
@@ -258,7 +272,6 @@ final public class Iodine: NSObject {
             throw IodineError.internalError
         }
         
-        iodine_srand()
         client_init()
         
         if !isSetupComplete {
@@ -266,7 +279,7 @@ final public class Iodine: NSObject {
         }
         
         var fds = [Int32](repeating: -1, count: 2)
-        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0 else {
+        guard socketpair(AF_UNIX, SOCK_DGRAM, 0, &fds) == 0 else {
             throw IodineError.socketCreateFailed
         }
         iodineToNetworkExtensionSocket = fds[0]
@@ -280,14 +293,8 @@ final public class Iodine: NSObject {
             throw IodineError.dnsOpenFailed
         }
         
-        print("Opening streams...", to: &StdioRedirect.standardError)
-        guard openStream() else {
-            print("ERROR: openStream failed", to: &StdioRedirect.standardError)
-            stop()
-            throw IodineError.internalError
-        }
         
-        let dnsHostname = String(cString: format_addr(&nameserver, Int32(nameserver.ss_len)))
+        let dnsHostname = String(cString: format_addr(&nameserver, socklen_t(nameserver.ss_len)))
         print("Sending DNS queries for \(topDomain ?? "(null)") to \(dnsHostname)", to: &StdioRedirect.standardError);
         guard client_handshake(dnsSocket, rawMode ? 1 : 0, maxDownstreamFragmentSize > 0 ? 0 : 1, Int32(maxDownstreamFragmentSize)) == 0 else {
             print("ERROR: client_handshake failed", to: &StdioRedirect.standardError)
@@ -303,164 +310,75 @@ final public class Iodine: NSObject {
         print("Connection setup complete, transmitting data.", to: &StdioRedirect.standardError)
         
         self.isRunning = true
+        openPackets()
+        let tunFD = networkExtensionToIodineSocket, dnsFD = dnsSocket
         runQueue!.async {
-            client_tunnel(self.networkExtensionToIodineSocket, self.dnsSocket)
-            self.isRunning = false
-            self.delegate?.iodineDidStop()
+            client_tunnel(tunFD, dnsFD)
+            DispatchQueue.main.async {
+                if self.isRunning { self.delegate?.iodineDidStop() }
+            }
         }
     }
     
     public func stop() {
-        closeStream()
-        if iodineToNetworkExtensionSocket >= 0 {
-            close(iodineToNetworkExtensionSocket)
+        isRunning = false
+        client_stop()
+        // Wake select before waiting for the worker. Close descriptors only after it exits.
+        packetQueue.sync {
+            if iodineToNetworkExtensionSocket >= 0 {
+                var wake: UInt8 = 0
+                _ = send(iodineToNetworkExtensionSocket, &wake, 1, MSG_DONTWAIT)
+            }
+        }
+        runQueue?.sync {}
+        packetQueue.sync {
+            packetSource?.cancel()
+            packetSource = nil
+            if iodineToNetworkExtensionSocket >= 0 { close(iodineToNetworkExtensionSocket) }
             iodineToNetworkExtensionSocket = -1
         }
-        if networkExtensionToIodineSocket >= 0 {
-            close(networkExtensionToIodineSocket)
-            networkExtensionToIodineSocket = -1
-        }
-        if dnsSocket >= 0 {
-            close_dns(dnsSocket)
-            dnsSocket = -1
-        }
-        client_stop()
-        runQueue!.sync {
-            print("Service has stopped.", to: &StdioRedirect.standardError)
-        }
+        if networkExtensionToIodineSocket >= 0 { close(networkExtensionToIodineSocket) }
+        networkExtensionToIodineSocket = -1
+        if dnsSocket >= 0 { close_dns(dnsSocket) }
+        dnsSocket = -1
+        client_cleanup()
+        isSetupComplete = false
     }
-}
 
-extension Iodine: StreamDelegate {
-    fileprivate func openStream() -> Bool {
-        var readStream: Unmanaged<CFReadStream>?
-        var writeStream: Unmanaged<CFWriteStream>?
-        
-        CFStreamCreatePairWithSocket(kCFAllocatorDefault,
-                                     iodineToNetworkExtensionSocket,
-                                     &readStream,
-                                     &writeStream)
-        
-        inputStream = readStream?.takeRetainedValue()
-        if inputStream == nil {
-            return false
+    private func openPackets() {
+        let fd = iodineToNetworkExtensionSocket
+        let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: packetQueue)
+        source.setEventHandler { [weak self] in
+            guard let self = self else { return }
+            var bytes = [UInt8](repeating: 0, count: 65536)
+            let count = recv(fd, &bytes, bytes.count, MSG_DONTWAIT)
+            guard count >= 24, bytes[4] >> 4 == 4 else { return }
+            let packet = Data(bytes[4..<count])
+            self.delegate?.iodineReadData([packet], withProtocols: [NSNumber(value: AF_INET)])
         }
-        outputStream = writeStream?.takeRetainedValue()
-        if outputStream == nil {
-            inputStream = nil
-            return false
-        }
-        inputStream!.delegate = self
-        inputStream!.schedule(in: .main, forMode: .common)
-        outputStream!.schedule(in: .main, forMode: .common)
-        inputStream!.open()
-        outputStream!.open()
-        return true
+        packetSource = source
+        source.resume()
     }
-    
-    fileprivate func closeStream() {
-        if inputStream != nil {
-            inputStream!.remove(from: .current, forMode: .common)
-            inputStream!.close()
-            inputStream = nil
-        }
-        if outputStream != nil {
-            outputStream!.remove(from: .current, forMode: .common)
-            outputStream!.close()
-            outputStream = nil
-        }
-    }
-    
-    public func stream(_ stream: Stream, handle: Stream.Event) {
-        switch handle {
-        case .hasBytesAvailable:
-            do {
-                let (data, protocols) = try readDataFrom(stream: stream as! InputStream)
-                delegate?.iodineReadData(data, withProtocols: protocols)
-            } catch {
-                delegate?.iodineError(error)
-            }
-        case .errorOccurred:
-            delegate?.iodineError(stream.streamError)
-        default:
-            break
-        }
-    }
-    
-    private func readPacketFrom(stream: InputStream, headerLength: Int, lengthOffset: Int, lengthIncludesHeader: Bool) throws -> Data {
-        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: headerLength)
-        defer {
-            buffer.deallocate()
-        }
-        guard stream.read(buffer, maxLength: headerLength) == headerLength else {
-            throw IodineError.incompletePacket
-        }
-        let raw = UnsafeRawPointer(buffer.advanced(by: lengthOffset)).load(as: UInt16.self)
-        let lengthField = NSSwapBigShortToHost(raw)
-        let payloadLength: Int
-        if lengthIncludesHeader {
-            payloadLength = Int(lengthField) - headerLength
-        } else {
-            payloadLength = Int(lengthField)
-        }
-        guard payloadLength >= 0 else {
-            throw IodineError.invalidPacket
-        }
-        var data = Data(bytes: buffer, count: headerLength)
-        let remaining = UnsafeMutablePointer<UInt8>.allocate(capacity: payloadLength)
-        defer {
-            remaining.deallocate()
-        }
-        guard stream.read(remaining, maxLength: payloadLength) == payloadLength else {
-            throw IodineError.incompletePacket
-        }
-        data.append(Data(bytes: remaining, count: payloadLength))
-        return data
-    }
-    
-    private func readDataFrom(stream: InputStream) throws -> ([Data], [NSNumber]) {
-        var packets = [Data]()
-        var protocols = [NSNumber]()
-        while stream.hasBytesAvailable {
-            let headerBuf = UnsafeMutablePointer<UInt8>.allocate(capacity: 4)
-            defer {
-                headerBuf.deallocate()
-            }
-            guard stream.read(headerBuf, maxLength: 4) == 4 else {
-                throw IodineError.incompletePacket
-            }
-            let raw = UnsafeRawPointer(headerBuf).load(as: UInt32.self)
-            let family = Int32(NSSwapBigIntToHost(raw))
-            if family == AF_INET || family == 0x0800 {
-                packets.append(try readPacketFrom(stream: stream, headerLength: 20, lengthOffset: 2, lengthIncludesHeader: true))
-                protocols.append(NSNumber(value: AF_INET))
-            } else if family == AF_INET6 || family == 0x86DD {
-                packets.append(try readPacketFrom(stream: stream, headerLength: 40, lengthOffset: 4, lengthIncludesHeader: false))
-                protocols.append(NSNumber(value: AF_INET6))
-            } else {
-                throw IodineError.unrecognizedFamily(family)
-            }
-        }
-        return (packets, protocols)
-    }
-    
+
     public func writeData(_ data: Data, family: Int32) {
-        guard isRunning, let outputStream = outputStream else {
-            delegate?.iodineError(IodineError.notConnected)
-            return
-        }
-        var familyNtohl = family.bigEndian
-        var packet = withUnsafeBytes(of: &familyNtohl) { bytes in
-            Data(bytes: bytes.baseAddress!, count: bytes.count)
-        }
+        // The iodine tunnel carries IPv4. Preserve one datagram per IP packet.
+        guard family == AF_INET else { return }
+        var prefix = UInt32(0x0800).bigEndian
+        var packet = withUnsafeBytes(of: &prefix) { Data($0) }
         packet.append(data)
-        packet.withUnsafeBytes { bytes in
-            _ = outputStream.write(bytes.bindMemory(to: UInt8.self).baseAddress!, maxLength: packet.count)
+        packetQueue.async {
+            guard self.iodineToNetworkExtensionSocket >= 0 else { return }
+            packet.withUnsafeBytes { bytes in
+                _ = send(self.iodineToNetworkExtensionSocket, bytes.baseAddress, bytes.count, MSG_DONTWAIT)
+            }
         }
     }
+
+    deinit { topDomainPtr?.deallocate() }
 }
 
 public enum IodineError: LocalizedError {
+    case invalidCredentials
     case internalError
     case invalidNameserverHost
     case defaultDnsNotFound
@@ -475,6 +393,8 @@ public enum IodineError: LocalizedError {
     
     public var errorDescription: String? {
         switch self {
+        case .invalidCredentials:
+            return "Missing or invalid tunnel credentials. An encrypted connection requires the server’s 32-byte shared key."
         case .internalError:
             return NSLocalizedString("An internal error has occurred.", comment: "Iodine")
         case .invalidNameserverHost:

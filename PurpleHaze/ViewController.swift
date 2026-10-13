@@ -20,10 +20,13 @@ import NetworkExtension
 class ViewController: UIViewController {
     @IBOutlet var topDomainTextField: UITextField!
     @IBOutlet var passwordTextField: UITextField!
+    @IBOutlet var sharedKeyTextField: UITextField!
     @IBOutlet var logTextView: UITextView!
     @IBOutlet var vpnStartSwitch: UISwitch!
+    @IBOutlet var serverProxySwitch: UISwitch!
     @IBOutlet var activityIndicator: UIActivityIndicatorView!
     
+    private var credentialsLoaded = false
     var vpnObserver: Any?
     var vpnManager: NEVPNManager? {
         didSet {
@@ -53,7 +56,28 @@ class ViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         topDomainTextField.text = UserDefaults.standard.string(forKey: IodineSettings.topDomain)
-        passwordTextField.text = UserDefaults.standard.string(forKey: IodineSettings.password)
+        do {
+            // Migrate the original app's password out of preferences.
+            if let old = UserDefaults.standard.string(forKey: IodineSettings.password) {
+                try Credentials.save(Data(old.utf8), account: Credentials.password)
+                UserDefaults.standard.removeObject(forKey: IodineSettings.password)
+            }
+            if let password = try Credentials.read(Credentials.password) {
+                passwordTextField.text = String(data: password, encoding: .utf8)
+            }
+            if UserDefaults.standard.bool(forKey: IodineSettings.encrypted) {
+                guard let key = try Credentials.read(Credentials.sharedKey), key.count == 32 else {
+                    throw NSError(domain: "Iodine", code: 1, userInfo: [NSLocalizedDescriptionKey:
+                        "The saved encryption key is unavailable. Restore Keychain access before connecting."])
+                }
+                sharedKeyTextField.text = key.base64EncodedString()
+            }
+            credentialsLoaded = true
+        } catch { showError(error) }
+        serverProxySwitch.isOn = UserDefaults.standard.bool(forKey: IodineSettings.serverProxy)
+        serverProxySwitch.accessibilityLabel = "Server proxy for TCP, UDP and DNS. Requires a shared key."
+        sharedKeyTextField.autocapitalizationType = .none
+        sharedKeyTextField.accessibilityLabel = "Shared key in Base64. Leave empty for legacy mode."
         
         // 配置日志视图样式
         logTextView.backgroundColor = UIColor.systemGray6
@@ -105,6 +129,14 @@ class ViewController: UIViewController {
         }
     }
     
+    @IBAction func serverProxyChanged(_ sender: UISwitch) {
+        // Apply on the next connection; changing an active route silently is unsafe.
+        UserDefaults.standard.set(sender.isOn, forKey: IodineSettings.serverProxy)
+        if vpnManager?.connection.status == .connected {
+            logToUI("Proxy preference saved. Reconnect to apply it.")
+        }
+    }
+
     @IBAction func vpnStartSwitchChanged(_ sender: Any) {
         if vpnStartSwitch.isOn {
             clearLog()
@@ -116,7 +148,35 @@ class ViewController: UIViewController {
             }
             logToUI("Top domain: \(topdomain)")
             UserDefaults.standard.set(topdomain, forKey: IodineSettings.topDomain)
-            UserDefaults.standard.set(passwordTextField.text, forKey: IodineSettings.password)
+            do {
+                let keyText = (sharedKeyTextField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if serverProxySwitch.isOn && keyText.isEmpty {
+                    showError(message: "Server proxy requires the server’s shared key and encrypted mode.")
+                    vpnStartSwitch.isOn = false
+                    return
+                }
+                UserDefaults.standard.set(serverProxySwitch.isOn, forKey: IodineSettings.serverProxy)
+                if keyText.isEmpty {
+                    let password = Data((passwordTextField.text ?? "").utf8)
+                    guard password.count <= 32 else {
+                        showError(message: "Legacy passwords must contain at most 32 UTF-8 bytes.")
+                        return
+                    }
+                    try Credentials.save(password, account: Credentials.password)
+                    try Credentials.remove(Credentials.sharedKey)
+                } else {
+                    guard let key = Data(base64Encoded: keyText), key.count == 32 else {
+                        showError(message: "Enter the Base64 representation of the server’s 32-byte key.")
+                        return
+                    }
+                    try Credentials.save(key, account: Credentials.sharedKey)
+                }
+                UserDefaults.standard.set(!keyText.isEmpty, forKey: IodineSettings.encrypted)
+                logToUI(keyText.isEmpty ? "Legacy connection (unencrypted)" : "Encrypted connection required")
+            } catch {
+                showError(error)
+                return
+            }
             setupVpn(with: vpnManager)
         } else {
             logToUI("VPN switch turned OFF")
@@ -147,7 +207,7 @@ extension ViewController {
                 await MainActor.run {
                     self.logToUI("Found \(managers.count) VPN configuration(s)")
                 }
-                if !managers.isEmpty, let manager = managers.first {
+                if let manager = managers.first(where: { ($0.protocolConfiguration as? NETunnelProviderProtocol)?.providerBundleIdentifier == self.tunnelBundleId }) {
                     await MainActor.run {
                         self.vpnManager = manager
                         self.logToUI("VPN manager loaded successfully. Protocol: \(manager.protocolConfiguration?.description ?? "nil")")
@@ -157,7 +217,7 @@ extension ViewController {
                     let status = self.vpnManager?.connection.status ?? .invalid
                     self.logToUI("VPN status: \(self.statusString(status))")
                     self.vpnStartSwitch.isOn = status == .connected
-                    self.vpnStartSwitch.isEnabled = true
+                    self.vpnStartSwitch.isEnabled = self.credentialsLoaded
                 }
                 if let manager = self.vpnManager {
                     onExistingManager(manager)
@@ -165,7 +225,7 @@ extension ViewController {
             } catch {
                 await MainActor.run {
                     self.logToUI("ERROR loading VPN manager: \(error.localizedDescription)")
-                    self.vpnStartSwitch.isEnabled = true
+                    self.vpnStartSwitch.isEnabled = self.credentialsLoaded
                     self.showError(error)
                 }
             }
@@ -231,7 +291,8 @@ extension ViewController {
         let allOptions = UserDefaults.standard.dictionaryRepresentation()
         let iodineKeys: Set<String> = [
             IodineSettings.topDomain,
-            IodineSettings.password,
+            IodineSettings.encrypted,
+            IodineSettings.serverProxy,
             IodineSettings.nameserverHost,
             IodineSettings.ipv6Support,
             IodineSettings.maxDownstreamFragmentSize,
@@ -240,7 +301,14 @@ extension ViewController {
             IodineSettings.selectTimeout,
             IodineSettings.hostnameMaxLength,
             IodineSettings.forceDnsType,
-            IodineSettings.forceEncoding
+            IodineSettings.forceEncoding,
+            IodineSettings.dnsServer,
+            IodineSettings.pacConfigUrl,
+            IodineSettings.pacJavascript,
+            IodineSettings.httpProxyServer,
+            IodineSettings.httpProxyPort,
+            IodineSettings.httpsProxyServer,
+            IodineSettings.httpsProxyPort
         ]
         
         let options = allOptions.filter { iodineKeys.contains($0.key) }.mapValues { $0 as! NSObject }
@@ -288,7 +356,7 @@ extension ViewController {
         logToUI("VPN connected successfully!")
         DispatchQueue.main.async {
             self.vpnStartSwitch.isOn = true
-            self.vpnStartSwitch.isEnabled = true
+            self.vpnStartSwitch.isEnabled = self.credentialsLoaded
             self.activityIndicator.stopAnimating()
         }
     }
@@ -306,7 +374,7 @@ extension ViewController {
         logToUI("VPN disconnected")
         DispatchQueue.main.async {
             self.vpnStartSwitch.isOn = false
-            self.vpnStartSwitch.isEnabled = true
+            self.vpnStartSwitch.isEnabled = self.credentialsLoaded
             self.activityIndicator.stopAnimating()
         }
     }

@@ -10,5 +10,9 @@
 	<array>
 		<string>group.$(PRODUCT_BUNDLE_PREFIX:default=com.osy86).Purple-Haze</string>
 	</array>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)$(PRODUCT_BUNDLE_PREFIX).Purple-Haze.credentials</string>
+	</array>
 </dict>
 </plist>
