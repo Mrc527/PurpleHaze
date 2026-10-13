@@ -23,3 +23,9 @@ tests/gen
 out
 build.xml
 local.properties
+
+.cxx/
+.deps/
+*.key
+*.keystore
+*.jks

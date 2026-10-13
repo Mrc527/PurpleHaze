@@ -24,6 +24,8 @@
 #ifndef _ENCODING_H_
 #define _ENCODING_H_
 
+#include "config.h"
+
 #include <stdbool.h>
 
 /* All-0, all-1, 01010101, 10101010: each 4 times to make sure the pattern
@@ -38,8 +40,10 @@
 
 struct encoder {
 	const char name[8];
-	int (*encode)(char *dst, size_t *dstlen, const void *src, size_t srclen);
-	int (*decode)(void *dst, size_t *dstlen, const char *src, size_t srclen);
+	unsigned int (*encode)(char *dst, size_t *dstlen,
+			       const void *src, size_t srclen);
+	unsigned int (*decode)(void *dst, size_t *dstlen,
+			       const char *src, size_t srclen);
 
 	const bool places_dots;
 	const bool eats_dots;
@@ -48,6 +52,7 @@ struct encoder {
 	const int blocksize_encoded;
 };
 
+size_t hostname_need(const char *);
 int build_hostname(char *, size_t, const char *, const size_t, const char *,
 		   const struct encoder *, int);
 int unpack_data(char *, size_t, char *, size_t, const struct encoder *);

@@ -22,15 +22,19 @@
 #include <string.h>
 #include <strings.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <unistd.h>
 #include <sys/param.h>
 #include <sys/time.h>
 #include <fcntl.h>
-#include <zlib.h>
 #include <time.h>
+#include <openssl/crypto.h>
+#include <zlib.h>
 
-#ifdef WINDOWS32
-#include "windows.h"
+#include "config.h"
+
+#ifdef WINDOWS
+#include "windows_dns.h"
 #else
 #include <arpa/nameser.h>
 #ifdef ANDROID
@@ -46,8 +50,10 @@
 #endif
 
 #include "common.h"
+#include "compat.h"
 #include "encoding.h"
 #include "dns.h"
+#include "secure.h"
 #include "login.h"
 #include "tun.h"
 #include "version.h"
@@ -55,8 +61,14 @@
 
 static void handshake_lazyoff(int dns_fd);
 
-static int running;
-static const char *password;
+static _Atomic int running;
+static struct secure_session *secure;
+static int encrypted_mode;
+static int want_proxy;
+static unsigned short proxy_http_port, proxy_socks_port;
+static char proxy_password[33];
+static char password[33];
+static int login_seed;
 
 static struct sockaddr_storage nameserv;
 static int nameserv_len;
@@ -83,7 +95,7 @@ static uint16_t chunkid_prev2;
 
 /* The encoder used for data packets
  * Defaults to Base32, can be changed after handshake */
-const static struct encoder *dataenc = &base32_ops;
+static const struct encoder *dataenc = &base32_ops;
 
 /* The encoder to use for downstream data */
 static char downenc = ' ';
@@ -105,12 +117,28 @@ static int hostname_maxlen = 0xFF;
 void
 client_init(void)
 {
+	unsigned int r;
+
+	client_cleanup();
+	encrypted_mode = 0;
+	want_proxy = 0;
+	dataenc = &base32_ops;
+	downenc = ' ';
+	do_qtype = T_UNSET;
+	hostname_maxlen = 0xff;
+	send_query_sendcnt = -1;
+	send_query_recvcnt = 0;
 	running = 1;
-	rand_seed = ((unsigned int) rand()) & 0xFFFF;
-	send_ping_soon = 1;	/* send ping immediately after startup */
+	/* rand_seed/chunkid identify our outgoing DNS queries and are sent
+	   on the wire; seed them from a CSPRNG (they used to come from
+	   rand() after srand(time(NULL)), making them predictable). */
+	secure_random(&r, sizeof(r));
+	rand_seed = r & 0xFFFF;
+	send_ping_soon = 1;	/* send ping immediately at startup */
 	conn = CONN_DNS_NULL;
 
-	chunkid = ((unsigned int) rand()) & 0xFFFF;
+	secure_random(&r, sizeof(r));
+	chunkid = r & 0xFFFF;
 	chunkid_prev = 0;
 	chunkid_prev2 = 0;
 
@@ -149,9 +177,72 @@ client_set_topdomain(const char *cp)
 }
 
 void
-client_set_password(const char *cp)
+client_set_password(const char *value)
 {
-	password = cp;
+	client_cleanup();
+	encrypted_mode = 0;
+	strlcpy(password, value ? value : "", sizeof(password));
+}
+
+int
+client_set_key(const unsigned char *key, size_t len)
+{
+	client_cleanup();
+	/* Selection is explicit, even if key setup fails: never downgrade. */
+	encrypted_mode = 1;
+	if (!key || len != SECURE_KEY_LEN) return 0;
+	secure = secure_new(key, 0);
+	return secure != NULL;
+}
+
+int
+client_set_keyfile(const char *path)
+{
+	unsigned char key[SECURE_KEY_LEN];
+	int result;
+	client_cleanup();
+	encrypted_mode = 1;
+	if (!secure_load_key(path, key)) return 0;
+	result = client_set_key(key, sizeof(key));
+	OPENSSL_cleanse(key, sizeof(key));
+	return result;
+}
+
+void client_set_proxy(int enabled) { want_proxy = !!enabled; }
+unsigned short client_get_proxy_http_port(void) { return proxy_http_port; }
+unsigned short client_get_proxy_socks_port(void) { return proxy_socks_port; }
+const char *client_get_proxy_password(void) { return proxy_password; }
+
+void
+client_cleanup(void)
+{
+	secure_free(secure);
+	secure = NULL;
+	OPENSSL_cleanse(password, sizeof(password));
+	OPENSSL_cleanse(proxy_password, sizeof(proxy_password));
+	proxy_http_port = proxy_socks_port = 0;
+}
+
+static int
+encode_packet(const char *in, size_t len, char *out, size_t capacity)
+{
+	uLongf size = capacity;
+	if (encrypted_mode)
+		return secure_seal(secure, SECURE_DATA, in, len, out, capacity);
+	if (compress2((Bytef *)out, &size, (const Bytef *)in, len, 9) != Z_OK)
+		return -1;
+	return (int)size;
+}
+
+static int
+decode_packet(const char *in, size_t len, char *out, size_t capacity)
+{
+	uLongf size = capacity;
+	if (encrypted_mode)
+		return secure_open(secure, SECURE_DATA, in, len, out, capacity);
+	if (uncompress((Bytef *)out, &size, (const Bytef *)in, len) != Z_OK)
+		return -1;
+	return (int)size;
 }
 
 int
@@ -171,8 +262,6 @@ client_set_qtype(char *qtype)
 		do_qtype = T_SRV;
 	else if (!strcasecmp(qtype, "TXT"))
 		do_qtype = T_TXT;
-    else
-        do_qtype = T_UNSET;
 	return (do_qtype == T_UNSET);
 }
 
@@ -294,12 +383,20 @@ send_query(int fd, char *hostname)
 }
 
 static void
-send_raw(int fd, char *buf, int buflen, int cmd)
+send_raw(int fd, char *buf, unsigned int buflen, int cmd)
 {
 	char packet[4096];
+	char ping[SECURE_OVERHEAD];
 	int len;
 
-	len = MIN(sizeof(packet) - RAW_HDR_LEN, buflen);
+	if (cmd == RAW_HDR_CMD_PING && encrypted_mode) {
+		len = secure_seal(secure, SECURE_PING, "", 0, ping, sizeof(ping));
+		if (len < 0) return;
+		buf = ping;
+		buflen = len;
+	}
+	if (buflen > sizeof(packet) - RAW_HDR_LEN) return;
+	len = buflen;
 
 	memcpy(packet, raw_header, RAW_HDR_LEN);
 	if (len) {
@@ -309,7 +406,7 @@ send_raw(int fd, char *buf, int buflen, int cmd)
 	len += RAW_HDR_LEN;
 	packet[RAW_HDR_CMD] = cmd | (userid & 0x0F);
 
-	sendto(fd, packet, len, 0, (struct sockaddr*)&raw_serv, sizeof(raw_serv));
+	sendto(fd, packet, len, 0, (struct sockaddr*)&raw_serv, raw_serv_len);
 }
 
 static void
@@ -341,8 +438,8 @@ static void
 send_chunk(int fd)
 {
 	char buf[4096];
-	int avail;
-	int code;
+	unsigned int avail;
+	unsigned int code;
 	char *p;
 	static int datacmc = 0;
 	char *datacmcchars = "abcdefghijklmnopqrstuvwxyz0123456789";
@@ -622,28 +719,24 @@ read_dns_withq(int dns_fd, int tun_fd, char *buf, int buflen, struct query *q)
 
 		return rv;
 	} else { /* CONN_RAW_UDP */
-		unsigned long datalen;
-		char buf[64*1024];
+		int datalen, cmd;
+		char plain[64*1024];
 
-		/* minimum length */
-		if (r < RAW_HDR_LEN) return 0;
-		/* should start with header */
-		if (memcmp(data, raw_header, RAW_HDR_IDENT_LEN)) return 0;
-		/* should be my user id */
-		if (RAW_HDR_GET_USR(data) != userid) return 0;
-
-		if (RAW_HDR_GET_CMD(data) == RAW_HDR_CMD_DATA ||
-		    RAW_HDR_GET_CMD(data) == RAW_HDR_CMD_PING)
-			lastdownstreamtime = time(NULL);
-
-		/* should be data packet */
-		if (RAW_HDR_GET_CMD(data) != RAW_HDR_CMD_DATA) return 0;
-
-		r -= RAW_HDR_LEN;
-		datalen = sizeof(buf);
-		if (uncompress((uint8_t*)buf, &datalen, (uint8_t*) &data[RAW_HDR_LEN], r) == Z_OK) {
-			write_tun(tun_fd, buf, datalen);
-		}
+		if (r < RAW_HDR_LEN || memcmp(data, raw_header, RAW_HDR_IDENT_LEN) ||
+		    RAW_HDR_GET_USR(data) != userid) return 0;
+		cmd = RAW_HDR_GET_CMD(data);
+		if (cmd != RAW_HDR_CMD_DATA && cmd != RAW_HDR_CMD_PING) return 0;
+		if (cmd == RAW_HDR_CMD_DATA)
+			datalen = decode_packet(data + RAW_HDR_LEN, r - RAW_HDR_LEN, plain, sizeof(plain));
+		else if (encrypted_mode)
+			datalen = secure_open(secure, SECURE_PING, data + RAW_HDR_LEN,
+			    r - RAW_HDR_LEN, plain, sizeof(plain));
+		else
+			datalen = r == RAW_HDR_LEN ? 0 : -1;
+		if (datalen < 0) return 0;
+		lastdownstreamtime = time(NULL);
+		if (cmd == RAW_HDR_CMD_DATA && secure_valid_packet(plain, datalen))
+			write_tun(tun_fd, plain, datalen);
 
 		/* don't process any further */
 		return 0;
@@ -736,8 +829,7 @@ handshake_waitdns(int dns_fd, char *buf, int buflen, char c1, char c2, int timeo
 static int
 tunnel_tun(int tun_fd, int dns_fd)
 {
-	unsigned long outlen;
-	unsigned long inlen;
+	int outlen;
 	char out[64*1024];
 	char in[64*1024];
 	ssize_t read;
@@ -750,11 +842,11 @@ tunnel_tun(int tun_fd, int dns_fd)
 	if (is_sending())
 		return -1;
 
-	outlen = sizeof(out);
-	inlen = read;
-	compress2((uint8_t*)out, &outlen, (uint8_t*)in, inlen, 9);
+	if (!secure_valid_packet(in, read)) return -1;
+	outlen = encode_packet(in, read, out, sizeof(out));
+	if (outlen < 0) return -1;
 
-	memcpy(outpkt.data, out, MIN(outlen, sizeof(outpkt.data)));
+	memcpy(outpkt.data, out, (size_t)outlen);
 	outpkt.sentlen = 0;
 	outpkt.offset = 0;
 	outpkt.seqno = (outpkt.seqno + 1) & 7;
@@ -983,7 +1075,7 @@ tunnel_dns(int tun_fd, int dns_fd)
 		}
 		inpkt.fragment = new_down_fragment;
 
-		datalen = MIN(read - 2, sizeof(inpkt.data) - inpkt.len);
+		datalen = MIN((unsigned int)(read - 2), sizeof(inpkt.data) - inpkt.len);
 
 		/* we are here only when read > 2, so datalen "always" >=1 */
 
@@ -992,12 +1084,10 @@ tunnel_dns(int tun_fd, int dns_fd)
 		inpkt.len += datalen;
 
 		if (buf[1] & 1) { /* If last fragment flag is set */
-			/* Uncompress packet and send to tun */
-			/* RE-USES buf[] */
-			datalen = sizeof(buf);
-			if (uncompress((uint8_t*)buf, &datalen, (uint8_t*) inpkt.data, inpkt.len) == Z_OK) {
-				write_tun(tun_fd, buf, datalen);
-			}
+			int plainlen = decode_packet(inpkt.data,
+			    inpkt.len, buf, sizeof(buf));
+			if (plainlen > 0 && secure_valid_packet(buf, plainlen))
+				write_tun(tun_fd, buf, plainlen);
 			inpkt.len = 0;
 			/* Keep .seqno and .fragment as is, so that we won't
 			   reassemble from duplicate fragments */
@@ -1078,116 +1168,107 @@ tunnel_dns(int tun_fd, int dns_fd)
 	return read;
 }
 
-static int
-always_1()
-{
-    return 1;
-}
-
 int
 client_tunnel(int tun_fd, int dns_fd)
 {
-    return client_tunnel_cb(tun_fd, dns_fd, &always_1);
-}
+	struct timeval tv;
+	fd_set fds;
+	int i;
 
-int
-client_tunnel_cb(int tun_fd, int dns_fd, int
-(*cb_ask_continue)())
-{
-    struct timeval tv;
-    fd_set fds;
-    int rv;
-    int i;
+	lastdownstreamtime = time(NULL);
+	send_query_sendcnt = 0;  /* start counting now */
 
-    rv = 0;
-    lastdownstreamtime = time(NULL);
-    send_query_sendcnt = 0;  /* start counting now */
+	while (running) {
+		tv.tv_sec = selecttimeout;
+		tv.tv_usec = 0;
 
-    while (running && cb_ask_continue()) {
-        tv.tv_sec = selecttimeout;
-        tv.tv_usec = 0;
+		if (is_sending()) {
+			/* fast timeout for retransmits */
+			tv.tv_sec = 1;
+			tv.tv_usec = 0;
+		}
 
-        if (is_sending()) {
-            /* fast timeout for retransmits */
-            tv.tv_sec = 1;
-            tv.tv_usec = 0;
-        }
+		if (send_ping_soon) {
+			tv.tv_sec = 0;
+			tv.tv_usec = send_ping_soon * 1000;
+		}
 
-        if (send_ping_soon) {
-            tv.tv_sec = 0;
-            tv.tv_usec = send_ping_soon * 1000;
-        }
+		FD_ZERO(&fds);
+		if (!is_sending() || outchunkresent >= 2) {
+			/* If re-sending upstream data, chances are that
+			   we're several seconds behind already and TCP
+			   will start filling tun buffer with (useless)
+			   retransmits.
+			   Get up-to-date fast by simply dropping stuff,
+			   that's what TCP is designed to handle. */
+			FD_SET(tun_fd, &fds);
+		}
+		FD_SET(dns_fd, &fds);
 
-        FD_ZERO(&fds);
-        if (!is_sending() || outchunkresent >= 2) {
-            /* If re-sending upstream data, chances are that
-               we're several seconds behind already and TCP
-               will start filling tun buffer with (useless)
-               retransmits.
-               Get up-to-date fast by simply dropping stuff,
-               that's what TCP is designed to handle. */
-            FD_SET(tun_fd, &fds);
-        }
-        FD_SET(dns_fd, &fds);
+		i = select(MAX(tun_fd, dns_fd) + 1, &fds, NULL, NULL, &tv);
 
-        i = select(MAX(tun_fd, dns_fd) + 1, &fds, NULL, NULL, &tv);
+		if (encrypted_mode && !secure_ready(secure)) {
+			warnx("Secure session failed; refusing to send unprotected traffic");
+			running = 0;
+		}
+		if (lastdownstreamtime + 60 < time(NULL)) {
+			warnx("No downstream data received in 60 seconds, shutting down.");
+			running = 0;
+		}
 
-        if (lastdownstreamtime + 60 < time(NULL)) {
-            warnx("No downstream data received in 60 seconds, shutting down.");
-            running = 0;
-        }
+		if (running == 0)
+			break;
 
-        if (running == 0)
-            break;
+		if (i < 0) {
+			warn("select");
+			return 1;
+		}
 
-        if (i < 0)
-            err(1, "select");
+		if (i == 0) {
+			/* timeout */
+			if (is_sending()) {
+				/* Re-send current fragment; either frag
+				   or ack probably dropped somewhere.
+				   But problem: no cache-miss-counter,
+				   so hostname will be identical.
+				   Just drop whole packet after 3 retries,
+				   and TCP retransmit will solve it.
+				   NOTE: tun dropping above should be
+				   >=(value_here - 1) */
+				if (outchunkresent < 3) {
+					outchunkresent++;
+					send_chunk(dns_fd);
+				} else {
+					outpkt.offset = 0;
+					outpkt.len = 0;
+					outpkt.sentlen = 0;
+					outchunkresent = 0;
 
-        if (i == 0) {
-            /* timeout */
-            if (is_sending()) {
-                /* Re-send current fragment; either frag
-                   or ack probably dropped somewhere.
-                   But problem: no cache-miss-counter,
-                   so hostname will be identical.
-                   Just drop whole packet after 3 retries,
-                   and TCP retransmit will solve it.
-                   NOTE: tun dropping above should be
-                   >=(value_here - 1) */
-                if (outchunkresent < 3) {
-                    outchunkresent++;
-                    send_chunk(dns_fd);
-                } else {
-                    outpkt.offset = 0;
-                    outpkt.len = 0;
-                    outpkt.sentlen = 0;
-                    outchunkresent = 0;
+					send_ping(dns_fd);
+				}
+			} else {
+				send_ping(dns_fd);
+			}
+			send_ping_soon = 0;
 
-                    send_ping(dns_fd);
-                }
-            } else {
-                send_ping(dns_fd);
-            }
-            send_ping_soon = 0;
+		} else {
 
-        } else {
+			if (FD_ISSET(tun_fd, &fds)) {
+				if (tunnel_tun(tun_fd, dns_fd) <= 0)
+					continue;
+				/* Returns -1 on error OR when quickly
+				   dropping data in case of DNS congestion;
+				   we need to _not_ do tunnel_dns() then.
+				   If chunk sent, sets send_ping_soon=0. */
+			}
+			if (FD_ISSET(dns_fd, &fds)) {
+				if (tunnel_dns(tun_fd, dns_fd) <= 0)
+					continue;
+			}
+		}
+	}
 
-            if (FD_ISSET(tun_fd, &fds)) {
-                if (tunnel_tun(tun_fd, dns_fd) <= 0)
-                    continue;
-                /* Returns -1 on error OR when quickly
-                   dropping data in case of DNS congestion;
-                   we need to _not_ do tunnel_dns() then.
-                   If chunk sent, sets send_ping_soon=0. */
-            }
-            if (FD_ISSET(dns_fd, &fds)) {
-                if (tunnel_dns(tun_fd, dns_fd) <= 0)
-                    continue;
-            }
-        }
-    }
-
-    return rv;
+	return 0;
 }
 
 static void
@@ -1285,20 +1366,22 @@ send_handshake_query(int fd, char *prefix)
 	cmc_dot[4] = 0;
 	rand_seed++;
 
-	buf[0] = 0;
-	strncat(buf, prefix, 60); /* 63 - space for 3 CMC bytes */
-	strcat(buf, cmc_dot);
-	strncat(buf, topdomain, sizeof(buf) - strlen(buf) - 1);
+	snprintf(buf, sizeof(buf), "%.60s%s%s", prefix, cmc_dot, topdomain);
 	send_query(fd, buf);
 }
 
 static void
-send_raw_udp_login(int dns_fd, int seed)
+send_raw_udp_login(int dns_fd)
 {
-	char buf[16];
-	login_calculate(buf, 16, password, seed + 1);
-
-	send_raw(dns_fd, buf, sizeof(buf), RAW_HDR_CMD_LOGIN);
+	char buf[SECURE_OVERHEAD];
+	int len;
+	if (encrypted_mode)
+		len = secure_seal(secure, SECURE_RAW_LOGIN, "", 0, buf, sizeof(buf));
+	else {
+		login_calculate(buf, 16, password, (int)((uint32_t)login_seed + 1));
+		len = 16;
+	}
+	if (len > 0) send_raw(dns_fd, buf, len, RAW_HDR_CMD_LOGIN);
 }
 
 static void
@@ -1347,17 +1430,18 @@ handshake_version(int dns_fd, int *seed)
 	char hex2[] = "0123456789ABCDEF";
 	char in[4096];
 	uint32_t payload;
+	uint32_t protocol = encrypted_mode ? PROTOCOL_VERSION : PROTOCOL_LEGACY;
 	int i;
 	int read;
 
 	for (i = 0; running && i < 5; i++) {
 
-		send_version(dns_fd, PROTOCOL_VERSION);
+		send_version(dns_fd, protocol);
 
 		read = handshake_waitdns(dns_fd, in, sizeof(in), 'v', 'V', i+1);
 
 		if (read >= 9) {
-			payload =  (((in[4] & 0xff) << 24) |
+			payload =  (((uint32_t)(unsigned char)in[4] << 24) |
 					((in[5] & 0xff) << 16) |
 					((in[6] & 0xff) << 8) |
 					((in[7] & 0xff)));
@@ -1369,11 +1453,11 @@ handshake_version(int dns_fd, int *seed)
 				userid_char2 = hex2[userid & 15];
 
 				fprintf(stderr, "Version ok, both using protocol v 0x%08x. You are user #%d\n",
-					PROTOCOL_VERSION, userid);
+					protocol, userid);
 				return 0;
 			} else if (strncmp("VNAK", in, 4) == 0) {
 				warnx("You use protocol v 0x%08x, server uses v 0x%08x. Giving up",
-						PROTOCOL_VERSION, payload);
+						protocol, payload);
 				return 1;
 			} else if (strncmp("VFUL", in, 4) == 0) {
 				warnx("Server full, all %d slots are taken. Try again later", payload);
@@ -1389,7 +1473,7 @@ handshake_version(int dns_fd, int *seed)
 }
 
 static int
-handshake_login(int dns_fd, int seed)
+handshake_login_legacy(int dns_fd, int seed)
 {
 	char in[4096];
 	char login[16];
@@ -1405,9 +1489,10 @@ handshake_login(int dns_fd, int seed)
 
 		send_login(dns_fd, login, 16);
 
-		read = handshake_waitdns(dns_fd, in, sizeof(in), 'l', 'L', i+1);
+		read = handshake_waitdns(dns_fd, in, sizeof(in) - 1, 'l', 'L', i+1);
 
 		if (read > 0) {
+			in[read] = 0;
 			int netmask;
 			if (strncmp("LNAK", in, 4) == 0) {
 				fprintf(stderr, "Bad password\n");
@@ -1420,13 +1505,24 @@ handshake_login(int dns_fd, int seed)
 
 				server[64] = 0;
 				client[64] = 0;
-				if (tun_setip(client, server, netmask) == 0 &&
-					tun_setmtu(mtu) == 0) {
+				/* The netmask prefix length comes from the server's reply.
+				   Validate it: tun_setip() computes the mask with
+				   "netmask <<= (32 - netbits)", which is undefined
+				   behavior for netbits < 1 or > 32 (an on-path
+				   attacker can supply the reply - see the lack of
+				   channel authentication). Reject like a malformed
+				   handshake and retry login. */
+				if (netmask < 1 || netmask > 32 || mtu < 68 || mtu > 1200) {
+					fprintf(stderr,
+						"Received bad handshake (netmask %d)\n",
+						netmask);
+				} else if (tun_setip(client, server, netmask) == 0 &&
+					   tun_setmtu(mtu) == 0) {
 
-					fprintf(stderr, "Server tunnel IP is %s\n", server);
+					fprintf(stderr, "Unencrypted legacy tunnel; server IP is %s\n", server);
 					return 0;
 				} else {
-					errx(4, "Failed to set IP and MTU");
+					{ warnx("Failed to set IP and MTU"); return 1; }
 				}
 			} else {
 				fprintf(stderr, "Received bad handshake\n");
@@ -1440,7 +1536,115 @@ handshake_login(int dns_fd, int seed)
 }
 
 static int
-handshake_raw_udp(int dns_fd, int seed)
+handshake_login(int dns_fd)
+{
+	unsigned int seq;
+	char request[3 + 3 + SECURE_CHUNK], reply[4096], config[256];
+	char server[65], client[65], tail;
+	int n, r = -1, retry, mtu, mask, assigned;
+	unsigned int version;
+
+	for (seq = 0; running && seq < SECURE_RPC_MAX; seq++) {
+		if (secure_handshake(secure, NULL, 0) < 0) break;
+		request[0] = userid;
+		request[3] = seq >> 8;
+		request[4] = seq & 255;
+		n = secure_drain(secure, request + 6, SECURE_CHUNK);
+		if (n < 0) break;
+		request[5] = n;
+		for (retry = 0; running && retry < 5; retry++) {
+			request[1] = rand_seed >> 8;
+			request[2] = rand_seed & 255;
+			rand_seed++;
+			send_packet(dns_fd, 'l', request, n + 6);
+			r = handshake_waitdns(dns_fd, reply, sizeof(reply), 'l', 'L', retry + 1);
+			if (r >= 3 && r <= 3 + SECURE_CHUNK &&
+			    (unsigned char)reply[0] == (seq >> 8) &&
+			    (unsigned char)reply[1] == (seq & 255) &&
+			    (unsigned char)reply[2] == r - 3) break;
+		}
+		if (!running || retry == 5) break;
+		if (secure_handshake(secure, reply + 3, r - 3) < 0) break;
+		if (!secure_ready(secure)) continue;
+		r = secure_read_config(secure, config, sizeof(config) - 1);
+		if (r < 0) break;
+		if (!r) continue;
+		config[r] = 0;
+		if (sscanf(config, "%x %d %64s %64s %d %d %c", &version, &assigned,
+		    server, client, &mtu, &mask, &tail) != 6 ||
+		    version != PROTOCOL_VERSION || assigned != userid ||
+		    mask < 8 || mask > 30 || mtu < 68 || mtu > 1200) break;
+		if (tun_setip(client, server, mask) || tun_setmtu(mtu))
+			{ warnx("Failed to set IP and MTU"); return 1; }
+		fprintf(stderr, "Authenticated TLS 1.3 session; encrypted tunnel to %s\n", server);
+		return 0;
+	}
+	warnx("Secure login failed (key mismatch, modified handshake, or DNS timeout)");
+	return 1;
+}
+
+static int
+handshake_proxy(int fd)
+{
+	unsigned char request[8] = {'P', 'X', '1', 1}, plain[44];
+	char wire[3 + 8 + SECURE_OVERHEAD] = {0}, response[4096], probe[4096];
+	int n, attempt;
+	if (!encrypted_mode || !secure_ready(secure)) return 1;
+	if (build_hostname(probe, sizeof(probe), wire, sizeof(wire), topdomain,
+	    &base32_ops, hostname_maxlen) != sizeof(wire)) {
+		warnx("Proxy negotiation does not fit: shorten topdomain or increase -M");
+		return 1;
+	}
+	for (attempt = 0; running && attempt < 40; attempt++) {
+		secure_random(request + 4, 4);
+		wire[0] = userid;
+		wire[1] = rand_seed >> 8; wire[2] = rand_seed++;
+		n = secure_seal(secure, SECURE_CONTROL_REQUEST, request, sizeof(request), wire + 3, sizeof(wire) - 3);
+		if (n < 0) break;
+		send_packet(fd, 'g', wire, n + 3);
+		n = handshake_waitdns(fd, response, sizeof(response), 'g', 'G', 1);
+		if (n <= 0) continue;
+		n = secure_open(secure, SECURE_CONTROL_REPLY, response, n, plain, sizeof(plain));
+		if (n != sizeof(plain) || memcmp(plain, "PX1", 3) || memcmp(plain + 4, request + 4, 4)) continue;
+		if (plain[3] == 0) break;
+		if (plain[3] == 2) {
+			proxy_http_port = ((unsigned)plain[8] << 8) | plain[9];
+			proxy_socks_port = ((unsigned)plain[10] << 8) | plain[11];
+			if (!proxy_http_port || !proxy_socks_port) break;
+			memcpy(proxy_password, plain + 12, 32); proxy_password[32] = 0;
+			fprintf(stderr, "Server proxy enabled: TCP, UDP and DNS via SOCKS5; HTTP/CONNECT port %u, SOCKS5 port %u\n",
+			    proxy_http_port, proxy_socks_port);
+			return 0;
+		}
+		if (plain[3] != 1) break;
+		/* Startup is asynchronous; give the supervisor time without busy polling. */
+		struct timeval delay = {0, 250000};
+		fd_set waitfds;
+		FD_ZERO(&waitfds); FD_SET(fd, &waitfds);
+		select(fd + 1, &waitfds, NULL, NULL, &delay);
+	}
+	warnx("Requested server proxy is unavailable; refusing to bypass it");
+	return 1;
+}
+
+static int
+raw_login_valid(const char *in, int len)
+{
+	char expected[16], empty[1];
+	if (len < RAW_HDR_LEN || memcmp(in, raw_header, RAW_HDR_IDENT_LEN) ||
+	    RAW_HDR_GET_USR(in) != userid || RAW_HDR_GET_CMD(in) != RAW_HDR_CMD_LOGIN)
+		return 0;
+	if (encrypted_mode)
+		return len == RAW_HDR_LEN + SECURE_OVERHEAD &&
+		    secure_open(secure, SECURE_RAW_LOGIN, in + RAW_HDR_LEN,
+		    len - RAW_HDR_LEN, empty, sizeof(empty)) == 0;
+	login_calculate(expected, sizeof(expected), password, (int)((uint32_t)login_seed - 1));
+	return len == RAW_HDR_LEN + sizeof(expected) &&
+	    CRYPTO_memcmp(expected, in + RAW_HDR_LEN, sizeof(expected)) == 0;
+}
+
+static int
+handshake_raw_udp(int dns_fd)
 {
 	struct timeval tv;
 	char get_ip[] = { 'i', b32_5to8(userid), 0 };
@@ -1499,13 +1703,13 @@ handshake_raw_udp(int dns_fd, int seed)
 	fflush(stderr);
 
 	/* do login against port 53 on remote server
-	 * based on the old seed. If reply received,
+	 * authenticated according to the explicitly selected protocol. If reply received,
 	 * switch to raw udp mode */
 	for (i = 0; running && i < 4; i++) {
 		tv.tv_sec = i + 1;
 		tv.tv_usec = 0;
 
-		send_raw_udp_login(dns_fd, seed);
+		send_raw_udp_login(dns_fd);
 
 		FD_ZERO(&fds);
 		FD_SET(dns_fd, &fds);
@@ -1515,16 +1719,9 @@ handshake_raw_udp(int dns_fd, int seed)
 		if (r > 0) {
 			/* recv() needed for windows, dont change to read() */
 			len = recv(dns_fd, in, sizeof(in), 0);
-			if (len >= (16 + RAW_HDR_LEN)) {
-				char hash[16];
-				login_calculate(hash, 16, password, seed - 1);
-				if (memcmp(in, raw_header, RAW_HDR_IDENT_LEN) == 0
-					&& RAW_HDR_GET_CMD(in) == RAW_HDR_CMD_LOGIN
-					&& memcmp(&in[RAW_HDR_LEN], hash, sizeof(hash)) == 0) {
-
-					fprintf(stderr, "OK\n");
-					return 1;
-				}
+			if (raw_login_valid(in, len)) {
+				fprintf(stderr, "OK\n");
+				return 1;
 			}
 		}
 		fprintf(stderr, ".");
@@ -2346,7 +2543,20 @@ client_handshake(int dns_fd, int raw_mode, int autodetect_frag_size, int fragsiz
 	int seed;
 	int upcodec;
 	int r;
+	if (want_proxy && !encrypted_mode) {
+		warnx("Proxy mode requires encryption (-K)");
+		return 1;
+	}
 
+	if (encrypted_mode) {
+		if (!secure) return 1;
+		char probe[4096], payload[6 + SECURE_CHUNK] = {0};
+		if (build_hostname(probe, sizeof(probe), payload, sizeof(payload),
+		    topdomain, &base32_ops, hostname_maxlen) != sizeof(payload)) {
+			warnx("Secure handshake does not fit: shorten topdomain or increase -M");
+			return 1;
+		}
+	}
 	dnsc_use_edns0 = 0;
 
 	/* qtype message printed in handshake function */
@@ -2364,12 +2574,15 @@ client_handshake(int dns_fd, int raw_mode, int autodetect_frag_size, int fragsiz
 		return r;
 	}
 
-	r = handshake_login(dns_fd, seed);
+	login_seed = seed;
+	r = encrypted_mode ? handshake_login(dns_fd) : handshake_login_legacy(dns_fd, seed);
 	if (r) {
 		return r;
 	}
 
-	if (raw_mode && handshake_raw_udp(dns_fd, seed)) {
+	if (want_proxy && handshake_proxy(dns_fd)) return 1;
+
+	if (raw_mode && handshake_raw_udp(dns_fd)) {
 		conn = CONN_RAW_UDP;
 		selecttimeout = 20;
 	} else {

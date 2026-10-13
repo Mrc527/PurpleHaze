@@ -19,6 +19,7 @@
 #include <sys/types.h>
 #include <sys/param.h>
 #include <sys/stat.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -29,9 +30,17 @@
 #include <fcntl.h>
 #include <errno.h>
 
-#ifdef WINDOWS32
+#include "config.h"
+
+#if HAVE_GETRANDOM
+#include <sys/random.h>
+#endif
+
+#ifdef WINDOWS
 #include <winsock2.h>
 #include <conio.h>
+#include <windows.h>
+#include <wincrypt.h>
 #else
 #include <arpa/nameser.h>
 #ifdef DARWIN
@@ -42,78 +51,104 @@
 #include <err.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <syslog.h>
 #include <sys/socket.h>
 #include <netdb.h>
 #endif
 
-#ifdef HAVE_SETCON
-# include <selinux/selinux.h>
+#if HAVE_LIBCAPNG
+#include <cap-ng.h>
 #endif
 
 #include "common.h"
+#include "compat.h"
 
 /* The raw header used when not using DNS protocol */
 const unsigned char raw_header[RAW_HDR_LEN] = { 0x10, 0xd1, 0x9e, 0x00 };
 
-/* daemon(3) exists only in 4.4BSD or later, and in GNU libc */
-#if !defined(ANDROID) && !defined(WINDOWS32) && !(defined(BSD) && (BSD >= 199306)) && !defined(__GLIBC__) && !defined(__HAIKU__)
-static int daemon(int nochdir, int noclose)
-{
- 	int fd, i;
+#if HAVE_CHECKTOKENMEMBERSHIP
+bool is_user_in(WELL_KNOWN_SID_TYPE sid_type) {
+	BOOL is_member = FALSE;
+	byte sid_buffer[SECURITY_MAX_SID_SIZE];
+	PSID sid = (PSID)sid_buffer;
+	DWORD sid_size = sizeof(sid_buffer);
 
- 	switch (fork()) {
- 		case 0:
- 			break;
- 		case -1:
- 			return -1;
- 		default:
- 			_exit(0);
- 	}
+	if (CreateWellKnownSid(sid_type, NULL, sid, &sid_size)) {
+		CheckTokenMembership(NULL, sid, &is_member);
+	}
 
- 	if (!nochdir) {
- 		chdir("/");
- 	}
-
- 	if (setsid() < 0) {
- 		return -1;
- 	}
-
- 	if (!noclose) {
- 		if ((fd = open("/dev/null", O_RDWR)) >= 0) {
- 			for (i = 0; i < 3; i++) {
- 				dup2(fd, i);
- 			}
- 			if (fd > 2) {
- 				close(fd);
- 			}
- 		}
- 	}
-	return 0;
+	return is_member;
 }
 #endif
 
-#if defined(__BEOS__) && !defined(__HAIKU__)
-int setgroups(int count, int *groups)
-{
-	/* errno = ENOSYS; */
-	return -1;
-}
-#endif
-
-#ifndef WINDOWS32
 void
-check_superuser(void)
+check_privileges(char *username, int port)
 {
+	(void)username;
+	(void)port;
+#if HAVE_LIBCAPNG
+	bool capable = true;
+
+	if (capng_get_caps_process() == -1) {
+		warnx("Unable to get capabilities");
+		exit(-1);
+	}
+
+	if (!capng_have_capability(CAPNG_EFFECTIVE, CAP_NET_ADMIN)) {
+		warnx("capabilities: CAP_NET_ADMIN required");
+		capable = false;
+	}
+
+	if (port) {
+		unsigned short int ip_unprivileged_port_start = 1024;
+
+		FILE *file = fopen("/proc/sys/net/ipv4/ip_unprivileged_port_start", "r");
+		if (!file) {
+			warnx("sysctl: unable to get ip_unprivileged_port_start value");
+			/* do not bail out here in case systemd.service has ProcSubset=pid set */
+		} else {
+			fscanf(file, "%hu", &ip_unprivileged_port_start);
+			fclose(file);
+		}
+
+		if (port < ip_unprivileged_port_start &&
+			!capng_have_capability(CAPNG_EFFECTIVE, CAP_NET_BIND_SERVICE)) {
+			warnx("capabilities: CAP_NET_BIND_SERVICE required");
+			capable = false;
+		}
+	}
+
+	if (username) {
+		if (!capng_have_capability(CAPNG_EFFECTIVE, CAP_SETUID)) {
+			warnx("capabilities: CAP_SETUID required");
+			capable = false;
+		}
+		if (!capng_have_capability(CAPNG_EFFECTIVE, CAP_SETGID)) {
+			warnx("capabilities: CAP_SETGID required");
+			capable = false;
+		}
+	}
+
+	if (!capable) {
+		exit(-1);
+	}
+#elif HAVE_GETEUID
 	if (geteuid() != 0) {
 		warnx("Run as root and you'll be happy.");
 		exit(-1);
 	}
-}
+#elif HAVE_CHECKTOKENMEMBERSHIP
+	if (!is_user_in(WinBuiltinAdministratorsSid) &&
+	    !is_user_in(WinBuiltinNetworkConfigurationOperatorsSid)) {
+		warnx("Missing admin or network config operator permissions.");
+		exit(-1);
+	}
+#else
+	/* No user permission check supported */
 #endif
+}
 
 char *
-format_addr(struct sockaddr_storage *sockaddr, int sockaddr_len)
+format_addr(struct sockaddr_storage *sockaddr, socklen_t sockaddr_len)
 {
 	static char dst[INET6_ADDRSTRLEN + 1];
 
@@ -126,7 +161,7 @@ format_addr(struct sockaddr_storage *sockaddr, int sockaddr_len)
 			struct in_addr ia;
 			/* Get mapped v4 addr from last 32bit field */
 			memcpy(&ia.s_addr, &addr->sin6_addr.s6_addr[12], sizeof(ia));
-			strcpy(dst, inet_ntoa(ia));
+			strlcpy(dst, inet_ntoa(ia), sizeof(dst));
 		} else {
 			getnameinfo((struct sockaddr *)sockaddr, sockaddr_len, dst, sizeof(dst) - 1, NULL, 0, NI_NUMERICHOST);
 		}
@@ -137,7 +172,7 @@ format_addr(struct sockaddr_storage *sockaddr, int sockaddr_len)
 }
 
 int
-get_addr(char *host, int port, int addr_family, int flags, struct sockaddr_storage *out)
+get_addr(char *host, int port, int addr_family, int flags, struct sockaddr_storage *out, socklen_t *outlen)
 {
 	struct addrinfo hints, *addr;
 	int res;
@@ -148,7 +183,7 @@ get_addr(char *host, int port, int addr_family, int flags, struct sockaddr_stora
 
 	memset(&hints, 0, sizeof(hints));
 	hints.ai_family = addr_family;
-#if defined(WINDOWS32) || defined(OPENBSD)
+#if defined(WINDOWS) || defined(OPENBSD)
 	/* AI_ADDRCONFIG misbehaves on windows, and does not exist in OpenBSD */
 	hints.ai_flags = flags;
 #else
@@ -158,30 +193,32 @@ get_addr(char *host, int port, int addr_family, int flags, struct sockaddr_stora
 	hints.ai_protocol = IPPROTO_UDP;
 
 	res = getaddrinfo(host, portnum, &hints, &addr);
-	if (res == 0) {
-		int addrlen = addr->ai_addrlen;
-		/* Grab first result */
-		memcpy(out, addr->ai_addr, addr->ai_addrlen);
-		freeaddrinfo(addr);
-		return addrlen;
+	if (res != 0) {
+		return -1;
 	}
-	return res;
+
+	/* Grab first result */
+	memcpy(out, addr->ai_addr, addr->ai_addrlen);
+	if (outlen) *outlen = addr->ai_addrlen;
+	freeaddrinfo(addr);
+	return 0;
 }
 
 int
-open_dns(struct sockaddr_storage *sockaddr, size_t sockaddr_len)
+open_dns(struct sockaddr_storage *sockaddr, socklen_t sockaddr_len)
 {
 	return open_dns_opt(sockaddr, sockaddr_len, -1);
 }
 
 int
-open_dns_opt(struct sockaddr_storage *sockaddr, size_t sockaddr_len, int v6only)
+open_dns_opt(struct sockaddr_storage *sockaddr, socklen_t sockaddr_len, int v6only)
 {
 	int flag;
 	int fd;
 
 	if ((fd = socket(sockaddr->ss_family, SOCK_DGRAM, IPPROTO_UDP)) < 0) {
-		err(1, "socket");
+		warn("socket");
+		return -1;
 	}
 
 	flag = 1;
@@ -190,9 +227,7 @@ open_dns_opt(struct sockaddr_storage *sockaddr, size_t sockaddr_len, int v6only)
 #endif
 	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const void*) &flag, sizeof(flag));
 
-#ifndef WINDOWS32
 	fd_set_close_on_exec(fd);
-#endif
 
 	if (sockaddr->ss_family == AF_INET6 && v6only >= 0) {
 		setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, (const void*) &v6only, sizeof(v6only));
@@ -204,8 +239,11 @@ open_dns_opt(struct sockaddr_storage *sockaddr, size_t sockaddr_len, int v6only)
 	setsockopt(fd, IPPROTO_IP, IP_OPT_DONT_FRAG, (const void*) &flag, sizeof(flag));
 #endif
 
-	if (bind(fd, (struct sockaddr*) sockaddr, sockaddr_len) < 0)
-		err(1, "bind() to %s", format_addr(sockaddr, sockaddr_len));
+	if (bind(fd, (struct sockaddr*) sockaddr, sockaddr_len) < 0) {
+		warn("bind() to %s", format_addr(sockaddr, sockaddr_len));
+		close(fd);
+		return -1;
+	}
 
 	fprintf(stderr, "Opened IPv%d UDP socket\n", sockaddr->ss_family == AF_INET6 ? 6 : 4);
 
@@ -216,11 +254,12 @@ int
 open_dns_from_host(char *host, int port, int addr_family, int flags)
 {
 	struct sockaddr_storage addr;
-	int addrlen;
+	socklen_t addrlen;
+	int res;
 
-	addrlen = get_addr(host, port, addr_family, flags, &addr);
-	if (addrlen < 0)
-		return addrlen;
+	res = get_addr(host, port, addr_family, flags, &addr, &addrlen);
+	if (res)
+		return res;
 
 	return open_dns(&addr, addrlen);
 }
@@ -231,68 +270,34 @@ close_dns(int fd)
 	close(fd);
 }
 
-void
-do_chroot(char *newroot)
+int
+build_netmask(int netbits, struct in_addr *addr)
 {
-#if !(defined(WINDOWS32) || defined(__BEOS__) || defined(__HAIKU__))
-	if (chroot(newroot) != 0 || chdir("/") != 0)
-		err(1, "%s", newroot);
-
-	if (seteuid(geteuid()) != 0 || setuid(getuid()) != 0) {
-		err(1, "set[e]uid()");
+	uint32_t netmask;
+	int i;
+	/* netbits is the CIDR prefix length (1..32). Out-of-range values
+	   would make "netmask <<= (32 - netbits)" below undefined
+	   behavior; reject them. Callers normally validate already, but
+	   the netmask can come from untrusted input (client handshake
+	   reply). */
+	if (netbits < 1 || netbits > 32) {
+		return 1;
 	}
-#else
-	warnx("chroot not available");
-#endif
-}
 
-void
-do_setcon(char *context)
-{
-#ifdef HAVE_SETCON
-	if (-1 == setcon(context))
-		err(1, "%s", context);
-#else
-	warnx("No SELinux support built in");
-#endif
-}
-
-void
-do_pidfile(char *pidfile)
-{
-#ifndef WINDOWS32
-	FILE *file;
-
-	if ((file = fopen(pidfile, "w")) == NULL) {
-		syslog(LOG_ERR, "Cannot write pidfile to %s, exiting", pidfile);
-		err(1, "do_pidfile: Can not write pidfile to %s", pidfile);
-	} else {
-		fprintf(file, "%d\n", (int)getpid());
-		fclose(file);
+	netmask = 0;
+	for (i = 0; i < netbits; i++) {
+		netmask = (netmask << 1) | 1;
 	}
-#else
-	fprintf(stderr, "Windows version does not support pid file\n");
-#endif
-}
-
-void
-do_detach(void)
-{
-#ifndef WINDOWS32
-	fprintf(stderr, "Detaching from terminal...\n");
-	daemon(0, 0);
-	umask(0);
-	alarm(0);
-#else
-	fprintf(stderr, "Windows version does not support detaching\n");
-#endif
+	netmask <<= (32 - netbits);
+	addr->s_addr = htonl(netmask);
+	return 0;
 }
 
 void
 read_password(char *buf, size_t len)
 {
 	char pwd[80] = {0};
-#ifndef WINDOWS32
+#ifndef WINDOWS
 	struct termios old;
 	struct termios tp;
 
@@ -307,7 +312,7 @@ read_password(char *buf, size_t len)
 
 	fprintf(stderr, "Enter tunnel password: ");
 	fflush(stderr);
-#ifndef WINDOWS32
+#ifndef WINDOWS
 	fscanf(stdin, "%79[^\n]", pwd);
 #else
 	for (i = 0; i < sizeof(pwd); i++) {
@@ -323,18 +328,17 @@ read_password(char *buf, size_t len)
 #endif
 	fprintf(stderr, "\n");
 
-#ifndef WINDOWS32
+#ifndef WINDOWS
 	tcsetattr(0, TCSANOW, &old);
 #endif
 
-	strncpy(buf, pwd, len);
-	buf[len-1] = '\0';
+	strlcpy(buf, pwd, len);
 }
 
 int
 check_topdomain(char *str, int allow_wildcard, char **errormsg)
 {
-	int i;
+	unsigned int i;
 	int dots = 0;
 	int chunklen = 0;
 
@@ -450,97 +454,6 @@ query_datalen(const char *qname, const char *topdomain)
 	return -1;
 }
 
-#if defined(WINDOWS32) || defined(ANDROID)
-#ifndef ANDROID
-int
-inet_aton(const char *cp, struct in_addr *inp)
-{
- inp->s_addr = inet_addr(cp);
- return inp->s_addr != INADDR_ANY;
-}
-#endif
-
-void
-vwarn(const char *fmt, va_list list)
-{
-	if (fmt) vfprintf(stderr, fmt, list);
-#ifndef ANDROID
-	if (errno == 0) {
-		fprintf(stderr, ": WSA error %d\n", WSAGetLastError());
-	} else {
-		fprintf(stderr, ": %s\n", strerror(errno));
-	}
-#endif
-}
-
-void
-warn(const char *fmt, ...)
-{
-	va_list list;
-
-	va_start(list, fmt);
-	vwarn(fmt, list);
-	va_end(list);
-}
-
-void
-err(int eval, const char *fmt, ...)
-{
-	va_list list;
-
-	va_start(list, fmt);
-	vwarn(fmt, list);
-	va_end(list);
-	exit(eval);
-}
-
-void
-vwarnx(const char *fmt, va_list list)
-{
-	if (fmt) vfprintf(stderr, fmt, list);
-	fprintf(stderr, "\n");
-}
-
-void
-warnx(const char *fmt, ...)
-{
-	va_list list;
-
-	va_start(list, fmt);
-	vwarnx(fmt, list);
-	va_end(list);
-}
-
-void
-errx(int eval, const char *fmt, ...)
-{
-	va_list list;
-
-	va_start(list, fmt);
-	vwarnx(fmt, list);
-	va_end(list);
-	exit(eval);
-}
-#endif
-
-#if defined(__ANDROID__)
-void android_log_callback(const char *);
-static char printf_buf[1024];;
-void android_printf(const char *fmt, ...)
-{
-    va_list list;
-    va_start(list, fmt);
-
-    vsnprintf(printf_buf,1024,fmt,list);
-    android_log_callback(printf_buf);
-
-    __android_log_vprint(ANDROID_LOG_INFO, "Iodine",
-                         fmt, list);
-    va_end(list);
-}
-#endif
-
-
 int recent_seqno(int ourseqno, int gotseqno)
 /* Return 1 if we've seen gotseqno recently (current or up to 3 back).
    Return 0 if gotseqno is new (or very old).
@@ -556,21 +469,105 @@ int recent_seqno(int ourseqno, int gotseqno)
 	return 0;
 }
 
-#ifndef WINDOWS32
 /* Set FD_CLOEXEC flag on file descriptor.
  * This stops it from being inherited by system() calls.
  */
 void
 fd_set_close_on_exec(int fd)
 {
+#if HAVE_FD_CLOEXEC
 	int flags;
 
 	flags = fcntl(fd, F_GETFD);
 	if (flags == -1)
-		err(4, "Failed to get fd flags");
+		{ warn("Failed to get fd flags"); return; }
 	flags |= FD_CLOEXEC;
 	if (fcntl(fd, F_SETFD, flags) == -1)
-		err(4, "Failed to set fd flags");
-}
+		warn("Failed to set fd flags");
 #endif
+	(void)fd;
+}
+
+/* Fill a buffer with random bytes.
+ *
+ * Prefer a CSPRNG: getrandom() (Linux >= 3.17 / glibc 2.25), arc4random()
+ * (BSDs, and glibc 2.36+), /dev/urandom, and on Windows the CryptoAPI.
+ * Fall back to rand() only if none of those are available at all.
+ */
+void
+secure_random(void *buf, size_t len)
+{
+	unsigned char *p = (unsigned char *) buf;
+
+#ifdef WINDOWS
+	{
+		HCRYPTPROV prov = 0;
+		if (CryptAcquireContext(&prov, NULL, NULL,
+			    PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) {
+			if (CryptGenRandom(prov, len, (BYTE *) p)) {
+				CryptReleaseContext(prov, 0);
+				return;
+			}
+			CryptReleaseContext(prov, 0);
+		}
+	}
+	while (len > 0) {
+		unsigned int v = rand();
+		size_t n = len < sizeof(v) ? len : sizeof(v);
+		memcpy(p, &v, n);
+		p += n;
+		len -= n;
+	}
+	return;
+#else
+#if HAVE_GETRANDOM
+	{
+		ssize_t r;
+		do {
+			r = getrandom(p, len, 0);
+		} while (r < 0 && errno == EINTR);
+		if (r > 0) {
+			p += r;
+			len -= r;
+		}
+	}
+	if (len == 0)
+		return;
+#endif
+
+#if HAVE_ARC4RANDOM_BUF
+	arc4random_buf(p, len);
+	return;
+#endif
+
+	{
+		int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+		if (fd >= 0) {
+			while (len > 0) {
+				ssize_t r = read(fd, p, len);
+				if (r < 0) {
+					if (errno == EINTR)
+						continue;
+					break;
+				}
+				if (r == 0)
+					break;
+				p += r;
+				len -= r;
+			}
+			close(fd);
+			if (len == 0)
+				return;
+		}
+	}
+
+	while (len > 0) {
+		unsigned int v = rand();
+		size_t n = len < sizeof(v) ? len : sizeof(v);
+		memcpy(p, &v, n);
+		p += n;
+		len -= n;
+	}
+#endif
+}
 

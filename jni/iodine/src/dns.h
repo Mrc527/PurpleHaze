@@ -18,6 +18,7 @@
 #ifndef __DNS_H__
 #define __DNS_H__
 
+#include "config.h"
 #include "common.h"
 
 typedef enum {
@@ -31,6 +32,7 @@ int dns_encode(char *, size_t, struct query *, qr_t, const char *, size_t);
 int dns_encode_ns_response(char *buf, size_t buflen, struct query *q,
 			   char *topdomain);
 int dns_encode_a_response(char *buf, size_t buflen, struct query *q);
+int dns_encode_nxdomain(char *buf, size_t buflen, struct query *q, const char *zone);
 unsigned short dns_get_id(char *packet, size_t packetlen);
 int dns_decode(char *, size_t, struct query *, qr_t, char *, size_t);
 

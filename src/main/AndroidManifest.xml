@@ -1,43 +1,30 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-          package="org.xapek.andiodine"
-          android:versionCode="6"
-          android:versionName="1.6">
-
-    <uses-sdk
-            android:minSdkVersion="26"
-            android:targetSdkVersion="35"/>
-
-    <uses-permission android:name="android.permission.INTERNET"/>
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
-
-    <application
-            android:icon="@drawable/logo"
-            android:label="@string/app_name"
-            android:logo="@drawable/logo">
-        <activity
-                android:name="org.xapek.andiodine.IodineMain"
-            android:exported="true">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <permission android:name="${applicationId}.INTERNAL" android:protectionLevel="signature" />
+    <uses-permission android:name="${applicationId}.INTERNAL" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <application android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:label="@string/app_name"
+        android:theme="@style/PurpleHazeTheme"
+        android:allowBackup="false" android:fullBackupContent="false"
+        android:dataExtractionRules="@xml/data_extraction_rules">
+        <activity android:name="ch.visin.purplehaze.HomeActivity" android:exported="true">
             <intent-filter>
-                <action android:name="android.intent.action.MAIN"/>
-
-                <category android:name="android.intent.category.LAUNCHER"/>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <activity
-                android:name="org.xapek.andiodine.IodinePref"
-                android:label="@string/pref_title"
-                android:launchMode="singleTop"
-                android:logo="@drawable/logo">
-        </activity>
-
-        <service
-                android:name=".IodineVpnService"
-            android:exported="true"
-            android:permission="android.permission.BIND_VPN_SERVICE">
-            <intent-filter>
-                <action android:name="android.net.VpnService"/>
-            </intent-filter>
+        <activity android:name="ch.visin.purplehaze.ProfileActivity" android:exported="false"
+            android:label="@string/pref_title" android:launchMode="singleTop" />
+        <service android:name="ch.visin.purplehaze.TunnelService" android:exported="true"
+            android:permission="android.permission.BIND_VPN_SERVICE" android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-initiated encrypted DNS tunnel using VpnService" />
+            <meta-data android:name="android.net.VpnService.SUPPORTS_ALWAYS_ON" android:value="false" />
+            <intent-filter><action android:name="android.net.VpnService" /></intent-filter>
         </service>
     </application>
 </manifest>

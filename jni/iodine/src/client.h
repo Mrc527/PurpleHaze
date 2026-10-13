@@ -18,6 +18,9 @@
 #ifndef __CLIENT_H__
 #define __CLIENT_H__
 
+#include "config.h"
+#include "common.h"
+
 void client_init(void);
 void client_stop(void);
 
@@ -26,7 +29,14 @@ const char *client_get_raw_addr(void);
 
 void client_set_nameserver(struct sockaddr_storage *, int);
 void client_set_topdomain(const char *cp);
-void client_set_password(const char *cp);
+void client_set_password(const char *password);
+int client_set_key(const unsigned char *key, size_t len);
+int client_set_keyfile(const char *path);
+void client_cleanup(void);
+void client_set_proxy(int enabled);
+unsigned short client_get_proxy_http_port(void);
+unsigned short client_get_proxy_socks_port(void);
+const char *client_get_proxy_password(void);
 int client_set_qtype(char *qtype);
 char *client_get_qtype(void);
 void client_set_downenc(char *encoding);
@@ -37,6 +47,5 @@ void client_set_hostname_maxlen(int i);
 int client_handshake(int dns_fd, int raw_mode, int autodetect_frag_size,
 		     int fragsize);
 int client_tunnel(int tun_fd, int dns_fd);
-int client_tunnel_cb(int tun_fd, int dns_fd, int (*cb_ask_continue)());
 
 #endif

@@ -18,6 +18,8 @@
 #ifndef __USER_H__
 #define __USER_H__
 
+#include "secure.h"
+
 #define USERS 16
 
 #define OUTPACKETQ_LEN 4		/* Note: 16 users * 1 packet = 1MB */
@@ -35,6 +37,8 @@
 /* Max advisable: 36/2 = 18. Total mem usage: QMEMDATA_LEN * USERS * 6 bytes */
 
 struct tun_user {
+	struct secure_session *secure;
+	uint32_t protocol;
 	char id;
 	int active;
 	int authenticated;
@@ -56,7 +60,7 @@ struct tun_user {
 	char downenc;
 	int out_acked_seqno;
 	int out_acked_fragment;
-	int fragsize;
+	unsigned int fragsize;
 	enum connection conn;
 	int lazy;
 	unsigned char qmemping_cmc[QMEMPING_LEN * 4];
@@ -84,8 +88,8 @@ int init_users(in_addr_t, int);
 const char* users_get_first_ip(void);
 int find_user_by_ip(uint32_t);
 int all_users_waiting_to_send(void);
-int find_available_user(void);
-void user_switch_codec(int userid, const struct encoder *enc);
-void user_set_conn_type(int userid, enum connection c);
+int find_available_user(unsigned int*);
+void user_switch_codec(unsigned int userid, const struct encoder *enc);
+void user_set_conn_type(unsigned int userid, enum connection c);
 
 #endif

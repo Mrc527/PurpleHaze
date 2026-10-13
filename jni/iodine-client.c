@@ -1,243 +1,121 @@
-#include <string.h>
-#include <errno.h>
+/* ISC license; see iodine/LICENSE. One native session, owned by the VPN worker. */
+#include <jni.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
-#include <time.h>
+#include <string.h>
 #include <unistd.h>
 #include <netdb.h>
-#include <stdio.h>
-
-#include <jni.h>
-
-#include <sys/system_properties.h>
-
+#include <openssl/crypto.h>
 #include "iodine/src/common.h"
-#include "iodine/src/tun.h"
 #include "iodine/src/client.h"
-#include "iodine/src/util.h"
-
-#define IODINE_CLIENT_CLASS "org/xapek/andiodine/IodineClient"
-#define IODINE_CLIENT_CLASS_LOG_CALLBACK "log_callback"
-#define IODINE_CLIENT_CLASS_LOG_CALLBACK_SIG "(Ljava/lang/String;)V"
-#define MAX_DNS_PROPERTIES 4
-
-static int dns_fd;
-
-static JavaVM *javaVM = 0;
-
-JNIEXPORT jint JNI_OnLoad(JavaVM* jvm, void* reserved) {
-    javaVM = jvm;
-
-    return JNI_VERSION_1_6;
+#include "iodine/src/encoding.h"
+#include "android-tun.h"
+static int dns_fd = -1;
+static char *domain;
+static JavaVM *vm;
+static jclass callback_class;
+static jmethodID callback_method;
+JNIEXPORT jint JNI_OnLoad(JavaVM *value, void *reserved) {
+    (void)reserved;
+    JNIEnv *env = NULL; vm = value;
+    if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) return JNI_ERR;
+    jclass cls = (*env)->FindClass(env, "ch/visin/purplehaze/NativeTunnel");
+    if (!cls) return JNI_ERR;
+    callback_class = (*env)->NewGlobalRef(env, cls);
+    callback_method = (*env)->GetStaticMethodID(env, cls, "log_callback", "(Ljava/lang/String;)V");
+    (*env)->DeleteLocalRef(env, cls);
+    return callback_class && callback_method ? JNI_VERSION_1_6 : JNI_ERR;
 }
-
-void android_log_callback(const char *msg_) {
-    int i;
-    JNIEnv *env;
-    char *msg = strdup(msg_);
-
-    if (!msg) {
-        return;
-    }
-
-    (*javaVM)->GetEnv(javaVM, (void**)&env, JNI_VERSION_1_6);
-    if (!env) {
-        __android_log_print(ANDROID_LOG_ERROR, "iodine", "Native Debug: env == null");
-        return;
-    }
-
-    if ((*javaVM)->AttachCurrentThread(javaVM, &env, 0) < 0) {
-        __android_log_print(ANDROID_LOG_ERROR, "iodine", "Failed to get the environment using AttachCurrentThread()");
-        return;
-    }
-
-    jclass clazz = (*env)->FindClass(env, IODINE_CLIENT_CLASS);
-    if (!clazz) {
-        __android_log_print(ANDROID_LOG_ERROR, "iodine", "Native Debug: clazz == null");
-        return;
-    }
-
-    jmethodID log_callback = (*env)->GetStaticMethodID(env, clazz,
-        IODINE_CLIENT_CLASS_LOG_CALLBACK, IODINE_CLIENT_CLASS_LOG_CALLBACK_SIG);
-    if (!log_callback) {
-        __android_log_print(ANDROID_LOG_ERROR, "iodine", "Native Debug: log_callback == null");
-        return;
-    }
-
-    for (i = 0; i< strlen(msg); i++) {
-        // not printable
-        if ( ! (msg[i] >= 0x20 && msg[i] <= 0x7e)) {
-            msg[i] = ' ';
-        }
-    }
-    jstring message = (*env)->NewStringUTF(env, msg);
-    if (!message) {
-        __android_log_print(ANDROID_LOG_ERROR, "iodine", "Native Debug: message == null");
-        return;
-    }
-    (*env)->CallStaticVoidMethod(env, clazz, log_callback, message);
-
-    (*env)->DeleteLocalRef(env,message);
-    free(msg);
+void android_log_callback(const char *msg) {
+    JNIEnv *env = NULL;
+    if (!vm || (*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) return;
+    jstring text = (*env)->NewStringUTF(env, msg);
+    if (!text) return;
+    (*env)->CallStaticVoidMethod(env, callback_class, callback_method, text);
+    (*env)->DeleteLocalRef(env, text);
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
 }
-
-JNIEXPORT jint JNICALL Java_org_xapek_andiodine_IodineClient_getDnsFd(
-		JNIEnv *env, jclass klass) {
-	return dns_fd;
+static void cleanup(void) {
+    if (dns_fd >= 0) close(dns_fd);
+    dns_fd = -1;
+    client_cleanup();
+    free(domain); domain = NULL;
 }
-
-JNIEXPORT jint JNICALL Java_org_xapek_andiodine_IodineClient_connect(
-		JNIEnv *env, jclass klass, jstring j_nameserv_addr, jstring j_topdomain, jboolean j_raw_mode, jboolean j_lazy_mode,
-		jstring j_password, jint j_request_hostname_size, jint j_response_fragment_size,
-		jstring j_request_type) {
-
-	// XXX strdup leaks
-	const char *__p_nameserv_addr = (*env)->GetStringUTFChars(env,
-			j_nameserv_addr, NULL);
-	char *p_nameserv_addr = strdup(__p_nameserv_addr);
-	struct sockaddr_storage p_nameserv;
-	int p_nameserv_len = get_addr(p_nameserv_addr, 53, AF_INET, 0, &p_nameserv);
-	(*env)->ReleaseStringUTFChars(env, j_nameserv_addr, __p_nameserv_addr);
-
-	const char *__p_topdomain = (*env)->GetStringUTFChars(env, j_topdomain,
-			NULL);
-	const char *p_topdomain = strdup(__p_topdomain);
-	__android_log_print(ANDROID_LOG_ERROR, "iodine", "Topdomain from vm: %s", p_topdomain);
-
-	(*env)->ReleaseStringUTFChars(env, j_topdomain, __p_topdomain);
-	__android_log_print(ANDROID_LOG_ERROR, "iodine", "Topdomain from vm: %s", p_topdomain);
-
-	// extract password parameter
-	const char *p_password = (*env)->GetStringUTFChars(env, j_password, NULL);
-	char passwordField[33];
-	memset(passwordField, 0, 33);
-	strncpy(passwordField, p_password, 32);
-	(*env)->ReleaseStringUTFChars(env, j_password, p_password);
-
-	// extract request type parameter
-	const char *p_requestType = (*env)->GetStringUTFChars(env, j_request_type, NULL);
-	char requestTypeField[8];
-	memset(requestTypeField, 0, 8);
-	strncpy(requestTypeField, p_requestType, 7);
-	(*env)->ReleaseStringUTFChars(env, j_request_type, p_requestType);
-	__android_log_print(ANDROID_LOG_ERROR, "iodine", "Request Type from vm: %s", requestTypeField);
-
-
-	tun_config_android.request_disconnect = 0;
-
-	int selecttimeout = 2; // original: 4
-	int lazy_mode;
-	int hostname_maxlen = j_request_hostname_size;
-	int raw_mode;
-	int autodetect_frag_size = j_response_fragment_size == 0 ? 1 : 0;
-	int max_downstream_frag_size = j_response_fragment_size;
-
-	if (j_raw_mode) {
-		raw_mode = 1;
-	} else {
-		raw_mode = 0;
-	}
-
-	if (j_lazy_mode) {
-		lazy_mode = 1;
-	} else {
-		lazy_mode = 0;
-	}
-
-	srand((unsigned) time(NULL));
-	client_init();
-	client_set_nameserver(&p_nameserv, p_nameserv_len);
-	client_set_selecttimeout(selecttimeout);
-	client_set_lazymode(lazy_mode);
-	client_set_topdomain(p_topdomain);
-	client_set_hostname_maxlen(hostname_maxlen);
-	client_set_password(passwordField);
-	client_set_qtype(requestTypeField);
-
-	if ((dns_fd = open_dns_from_host(NULL, 0, AF_INET, AI_PASSIVE)) == -1) {
-		printf("Could not open dns socket: %s", strerror(errno));
-		return 1;
-	}
-
-	if (client_handshake(dns_fd, raw_mode, autodetect_frag_size,
-			max_downstream_frag_size)) {
-		printf("Handshake unsuccessful: %s", strerror(errno));
-		close(dns_fd);
-		return 2;
-	}
-
-	if (client_get_conn() == CONN_RAW_UDP) {
-		printf("Sending raw traffic directly to %s\n", client_get_raw_addr());
-	}
-
-    // get request type used
-    char actualRequestType[12];
-    memset(actualRequestType, 0, 12);
-    strncpy(actualRequestType, client_get_qtype(), 11);
-    printf("Selected request type: %s\n", actualRequestType);
-
-	printf("Handshake successful, leave native code");
-	return 0;
+static char *copy_string(JNIEnv *env, jstring value) {
+    if (!value) return NULL;
+    const char *p = (*env)->GetStringUTFChars(env, value, NULL);
+    if (!p) return NULL;
+    char *copy = strdup(p);
+    (*env)->ReleaseStringUTFChars(env, value, p);
+    return copy;
 }
-
-
-static int tunnel_continue_cb() {
-	return ! tun_config_android.request_disconnect;
+JNIEXPORT jint JNICALL Java_ch_visin_purplehaze_NativeTunnel_prepare(
+    JNIEnv *env, jclass cls, jstring server, jstring topdomain, jstring password,
+    jbyteArray key, jboolean proxy, jboolean lazy, jint hostlen, jstring qtype) {
+    cleanup();
+    memset(&android_tun, 0, sizeof(android_tun));
+    char *host = copy_string(env, server), *pass = copy_string(env, password);
+    char *type = copy_string(env, qtype), *error = NULL;
+    domain = copy_string(env, topdomain);
+    struct sockaddr_storage addr;
+    socklen_t addrlen;
+    int result = -1;
+    unsigned char bytes[32] = {0};
+    if (!host || !pass || !type || !domain || hostlen < 100 || hostlen > 255 ||
+        check_topdomain(domain, 0, &error) || hostname_need(domain) > (size_t)hostlen ||
+        get_addr(host, DNS_PORT, AF_UNSPEC, AI_NUMERICHOST, &addr, &addrlen)) goto out;
+    if (key && ((*env)->GetArrayLength(env, key) != 32 || pass[0])) goto out;
+    if (proxy && !key) goto out;
+    client_init();
+    if (key) {
+        (*env)->GetByteArrayRegion(env, key, 0, 32, (jbyte *)bytes);
+        if ((*env)->ExceptionCheck(env) || !client_set_key(bytes, sizeof(bytes))) goto out;
+    } else client_set_password(pass);
+    client_set_proxy(proxy);
+    client_set_nameserver(&addr, (int)addrlen);
+    client_set_topdomain(domain);
+    client_set_selecttimeout(1);
+    client_set_lazymode(lazy);
+    client_set_hostname_maxlen(hostlen);
+    if (type[0] && client_set_qtype(type)) goto out;
+    dns_fd = open_dns_from_host(NULL, 0, addr.ss_family, AI_PASSIVE);
+    result = dns_fd;
+out:
+    OPENSSL_cleanse(bytes, sizeof(bytes));
+    if (pass) OPENSSL_cleanse(pass, strlen(pass));
+    free(host); free(pass); free(type);
+    if (result < 0) cleanup();
+    return result;
 }
-
-JNIEXPORT void JNICALL Java_org_xapek_andiodine_IodineClient_tunnelInterrupt(JNIEnv *env,
-		jclass klass) {
-	tun_config_android.request_disconnect = 1;
-	client_stop();
+JNIEXPORT jint JNICALL Java_ch_visin_purplehaze_NativeTunnel_handshake(
+    JNIEnv *env, jclass cls, jboolean raw, jint fragment) {
+    if (dns_fd < 0 || fragment < 0 || fragment > 65535) return 1;
+    return client_handshake(dns_fd, raw, fragment == 0, fragment);
 }
-
-JNIEXPORT jint JNICALL Java_org_xapek_andiodine_IodineClient_tunnel(JNIEnv *env,
-		jclass klass, jint tun_fd) {
-
-    printf("Run client_tunnel_cb");
-	int retval = client_tunnel_cb(tun_fd, dns_fd, &tunnel_continue_cb);
-
-	close(dns_fd);
-	close(tun_fd);
-	return retval;
+JNIEXPORT jint JNICALL Java_ch_visin_purplehaze_NativeTunnel_tunnel(JNIEnv *env, jclass cls, jint fd) {
+    if (dns_fd < 0 || fd < 0) return 1;
+    return client_tunnel(fd, dns_fd);
 }
-
-// String IodineClient.getIp()
-JNIEXPORT jstring JNICALL Java_org_xapek_andiodine_IodineClient_getIp(
-		JNIEnv *env, jclass klass) {
-	return (*env)->NewStringUTF(env, tun_config_android.ip);
+JNIEXPORT void JNICALL Java_ch_visin_purplehaze_NativeTunnel_tunnelInterrupt(JNIEnv *env, jclass cls) {
+    client_stop(); /* Atomic in the vendored Android adapter. Worker closes descriptors. */
 }
-
-// String IodineClient.getRemoteIp()
-JNIEXPORT jstring JNICALL Java_org_xapek_andiodine_IodineClient_getRemoteIp(
-		JNIEnv *env, jclass klass) {
-	return (*env)->NewStringUTF(env, tun_config_android.remoteip);
+JNIEXPORT void JNICALL Java_ch_visin_purplehaze_NativeTunnel_cleanup(JNIEnv *env, jclass cls) { cleanup(); }
+JNIEXPORT jstring JNICALL Java_ch_visin_purplehaze_NativeTunnel_getIp(JNIEnv *env, jclass cls) {
+    return (*env)->NewStringUTF(env, android_tun.ip);
 }
-
-// int IodineClient.getNetbits()
-JNIEXPORT jint JNICALL Java_org_xapek_andiodine_IodineClient_getNetbits(
-		JNIEnv *env, jclass klass) {
-	return tun_config_android.netbits;
+JNIEXPORT jstring JNICALL Java_ch_visin_purplehaze_NativeTunnel_getRemoteIp(JNIEnv *env, jclass cls) {
+    return (*env)->NewStringUTF(env, android_tun.peer);
 }
+JNIEXPORT jint JNICALL Java_ch_visin_purplehaze_NativeTunnel_getNetbits(JNIEnv *env, jclass cls) { return android_tun.netbits; }
+JNIEXPORT jint JNICALL Java_ch_visin_purplehaze_NativeTunnel_getMtu(JNIEnv *env, jclass cls) { return android_tun.mtu; }
 
-// int IodineClient.getMtu()
-JNIEXPORT jint JNICALL Java_org_xapek_andiodine_IodineClient_getMtu(JNIEnv *env,
-		jclass klass) {
-	return tun_config_android.mtu;
-}
-
-// String IodineClient.getPropertyNetDns1
-JNIEXPORT jstring JNICALL Java_org_xapek_andiodine_IodineClient_getPropertyNetDns1(
-		JNIEnv *env, jclass klass) {
-	struct sockaddr_in sa;
-	int i;
-	for (i = 1; i <= MAX_DNS_PROPERTIES; i++) {
-		char prop_name[PROP_NAME_MAX];
-		char dns[PROP_VALUE_MAX];
-		snprintf(prop_name, sizeof(prop_name), "net.dns%d", i);
-		__system_property_get(prop_name, dns);
-		if (inet_pton(AF_INET, dns, &(sa.sin_addr)) == 1) {
-			return (*env)->NewStringUTF(env, dns);
-		}
-	}
-	return (*env)->NewStringUTF(env, "");
+JNIEXPORT jint JNICALL Java_ch_visin_purplehaze_NativeTunnel_configureTransport(JNIEnv *env, jclass cls, jint timeout, jstring encoding) {
+    if (dns_fd < 0 || timeout < 1 || timeout > 60) return 1;
+    char *value = copy_string(env, encoding);
+    if (!value) return 1;
+    int valid = !value[0] || !strcmp(value, "base32") || !strcmp(value, "base64") ||
+        !strcmp(value, "base64u") || !strcmp(value, "base128") || !strcmp(value, "raw");
+    if (valid) { client_set_selecttimeout(timeout); if (value[0]) client_set_downenc(value); }
+    free(value); return valid ? 0 : 1;
 }

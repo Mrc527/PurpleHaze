@@ -19,15 +19,17 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#include "config.h"
 #include "read.h"
 
-static int
+static unsigned int
 readname_loop(char *packet, int packetlen, char **src, char *dst, size_t length, size_t loop)
 {
 	char *dummy;
 	char *s;
 	char *d;
-	int len;
+	char *pktend;
+	unsigned int len;
 	int offset;
 	char c;
 
@@ -36,14 +38,27 @@ readname_loop(char *packet, int packetlen, char **src, char *dst, size_t length,
 
 	len = 0;
 	s = *src;
+	pktend = packet + packetlen;
 	d = dst;
-	while(*s && len < length - 2) {
+	while(s < pktend && *s && len < length - 2) {
 		c = *s++;
+		if (s >= pktend) {
+			break; /* label length byte is the last byte of the packet */
+		}
 
 		/* is this a compressed label? */
 		if ((c & 0xc0) == 0xc0) {
+			if (s + 1 >= pktend) {
+				/* pointer high byte present, low byte missing */
+				s = pktend - 1;
+				if (len == 0) {
+					/* Bad jump first in packet */
+					return 0;
+				}
+				break; /* Bad jump after some data */
+			}
 			offset = (((s[-1] & 0x3f) << 8) | (s[0] & 0xff));
-			if (offset > packetlen) {
+			if (offset >= packetlen) {
 				if (len == 0) {
 					/* Bad jump first in packet */
 					return 0;
@@ -57,15 +72,15 @@ readname_loop(char *packet, int packetlen, char **src, char *dst, size_t length,
 			goto end;
 		}
 
-		while(c && len < length - 1) {
+		while(c && s < pktend && len < length - 1) {
 			*d++ = *s++;
 			len++;
 
 			c--;
 		}
 
-		if (len >= length - 1) {
-			break; /* We used up all space */
+		if (len >= length - 1 || s >= pktend) {
+			break; /* We used up all space or the packet */
 		}
 
 		if (*s != 0) {
@@ -80,16 +95,17 @@ end:
 	return len;
 }
 
-int
+unsigned int
 readname(char *packet, int packetlen, char **src, char *dst, size_t length)
 {
 	return readname_loop(packet, packetlen, src, dst, length, 10);
 }
 
-int
+unsigned int
 readshort(char *packet, char **src, unsigned short *dst)
 {
 	unsigned char *p;
+	(void)packet;
 
 	p = (unsigned char *) *src;
 	*dst = (p[0] << 8) | p[1];
@@ -98,11 +114,12 @@ readshort(char *packet, char **src, unsigned short *dst)
 	return sizeof(unsigned short);
 }
 
-int
+unsigned int
 readlong(char *packet, char **src, uint32_t *dst)
 {
 	/* A long as described in dns protocol is always 32 bits */
 	unsigned char *p;
+	(void)packet;
 
 	p = (unsigned char *) *src;
 
@@ -115,22 +132,24 @@ readlong(char *packet, char **src, uint32_t *dst)
 	return sizeof(uint32_t);
 }
 
-int
+unsigned int
 readdata(char *packet, char **src, char *dst, size_t len)
 {
 	memcpy(dst, *src, len);
+	(void)packet;
 
 	(*src) += len;
 
 	return len;
 }
 
-int
+unsigned int
 readtxtbin(char *packet, char **src, size_t srcremain, char *dst, size_t dstremain)
 {
 	unsigned char *uc;
-	int tocopy;
-	int dstused = 0;
+	unsigned int tocopy;
+	unsigned int dstused = 0;
+	(void)packet;
 
 	while (srcremain > 0)
 	{
@@ -158,27 +177,29 @@ int
 putname(char **buf, size_t buflen, const char *host)
 {
 	char *word;
-	int left;
+	unsigned int left;
 	char *h;
 	char *p;
+	char *saveptr = NULL;
 
 	h = strdup(host);
 	left = buflen;
 	p = *buf;
 
-	word = strtok(h, ".");
-	while(word) {
-		if (strlen(word) > 63 || strlen(word) > left) {
+	word = strtok_r(h, ".", &saveptr);
+	while (word) {
+		size_t word_len = strlen(word);
+		if (word_len > 63 || word_len > left) {
 			free(h);
 			return -1;
 		}
 
-		left -= (strlen(word) + 1);
-		*p++ = (char)strlen(word);
-		memcpy(p, word, strlen(word));
-		p += strlen(word);
+		left -= (word_len + 1);
+		*p++ = (char)word_len;
+		memcpy(p, word, word_len);
+		p += word_len;
 
-		word = strtok(NULL, ".");
+		word = strtok_r(NULL, ".", &saveptr);
 	}
 
 	*p++ = 0;
@@ -244,7 +265,7 @@ puttxtbin(char **buf, size_t bufremain, const char *from, size_t fromremain)
 	unsigned char uc;
 	unsigned char *ucp = &uc;
 	char *cp = (char *) ucp;
-	int tocopy;
+	unsigned int tocopy;
 	int bufused = 0;
 
 	while (fromremain > 0)

@@ -19,20 +19,11 @@
 #define _TUN_H_
 
 int open_tun(const char *);
+const char *tun_getname(void);
 void close_tun(int);
 int write_tun(int, char *, size_t);
 ssize_t read_tun(int, char *, size_t);
 int tun_setip(const char *, const char *, int);
 int tun_setmtu(const unsigned);
-
-#ifdef __ANDROID__
-extern struct _tun_config_android {
-    char *ip;
-    char *remoteip;
-    int netbits;
-    unsigned mtu;
-    int request_disconnect;
-} tun_config_android;
-#endif /* __ANDROID__ */
 
 #endif /* _TUN_H_ */

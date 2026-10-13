@@ -18,8 +18,10 @@
 #include <string.h>
 #include <sys/types.h>
 
-#ifdef WINDOWS32
-#include "windows.h"
+#include "config.h"
+
+#ifdef WINDOWS
+#include "windows_dns.h"
 #else
 #include <netinet/in.h>
 #include <arpa/inet.h>

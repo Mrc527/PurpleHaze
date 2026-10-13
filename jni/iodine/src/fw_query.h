@@ -17,9 +17,11 @@
 #ifndef __FW_QUERY_H__
 #define __FW_QUERY_H__
 
+#include "config.h"
+
 #include <sys/types.h>
-#ifdef WINDOWS32
-#include "windows.h"
+#ifdef WINDOWS
+#include "windows_dns.h"
 #include <winsock2.h>
 #else
 #include <sys/socket.h>
