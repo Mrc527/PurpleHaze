@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PurpleHaze</string>
+    <string name="pref_title">Profile</string>
+    <string name="connect">Connecting…</string>
+    <string name="close">Disconnect</string>
+</resources>
