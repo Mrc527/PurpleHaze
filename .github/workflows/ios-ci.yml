@@ -2,9 +2,9 @@ name: IOS CI
 on:
   push:
     branches: [main]
-    paths: ['ios/**', 'vendor/**', 'scripts/**', 'tools/**', '.github/workflows/**']
+    paths: ['ios/**', 'vendor/**', 'scripts/**', 'tools/**', '.github/workflows/**', '.gitattributes']
   pull_request:
-    paths: ['ios/**', 'vendor/**', 'scripts/**', 'tools/**', '.github/workflows/**']
+    paths: ['ios/**', 'vendor/**', 'scripts/**', 'tools/**', '.github/workflows/**', '.gitattributes']
   workflow_dispatch:
 permissions:
   contents: read

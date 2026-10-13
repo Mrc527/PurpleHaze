@@ -2,9 +2,9 @@ name: Android CI
 on:
   push:
     branches: [main]
-    paths: ['android/**', 'vendor/**', 'scripts/**', 'tools/**', '.github/workflows/**']
+    paths: ['android/**', 'vendor/**', 'scripts/**', 'tools/**', '.github/workflows/**', '.gitattributes']
   pull_request:
-    paths: ['android/**', 'vendor/**', 'scripts/**', 'tools/**', '.github/workflows/**']
+    paths: ['android/**', 'vendor/**', 'scripts/**', 'tools/**', '.github/workflows/**', '.gitattributes']
   workflow_dispatch:
 permissions:
   contents: read
