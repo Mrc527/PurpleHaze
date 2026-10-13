@@ -25,7 +25,7 @@ ARCHS[sdk=iphonesimulator*] = arm64
 
 PRODUCT_BUNDLE_PREFIX = ch.visin.iodine
 OPENSSL_IOS_ROOT = $(SRCROOT)/build-ios/deps/$(PLATFORM_NAME)
-HEADER_SEARCH_PATHS = $(inherited) "$(SRCROOT)/vendor/iodine/src" "$(SRCROOT)/Extension" "$(OPENSSL_IOS_ROOT)/include"
+HEADER_SEARCH_PATHS = $(inherited) "$(SRCROOT)/../vendor/iodine/src" "$(SRCROOT)/Extension" "$(OPENSSL_IOS_ROOT)/include"
 LIBRARY_SEARCH_PATHS = $(inherited) "$(OPENSSL_IOS_ROOT)/lib"
 OTHER_LDFLAGS = $(inherited) -lssl -lcrypto -lz
 ENABLE_USER_SCRIPT_SANDBOXING = NO

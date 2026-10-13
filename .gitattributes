@@ -1,0 +1,10 @@
+# Keep shell scripts usable on Linux/macOS when a checkout uses Windows defaults.
+*.sh text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+android/gradlew text eol=lf
+android/gradlew.bat text eol=crlf
+*.png binary
+*.jpg binary
+*.jar binary

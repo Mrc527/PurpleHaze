@@ -2,7 +2,8 @@
 
 Based on [DullJZ/PurpleHaze](https://github.com/DullJZ/PurpleHaze), commit
 `c310fd540c8fc05adb12c0e42023aedd930e9037` (Apache-2.0, derived from osy/PurpleHaze).
-The Xcode project builds the modified iodine client bundled in `vendor/iodine/src`.
+The Xcode project builds the modified iodine client shared with Android in
+[`../vendor/iodine/src`](../vendor/iodine/src).
 No sibling checkout or Git submodule is required. Original app attribution and
 licenses are preserved in `LICENSE` and the bundled `ThirdPartyNotices.txt`.
 
@@ -11,11 +12,11 @@ or iPad. OpenSSL 3.5.9 is linked statically. Rebuild the app when updating it.
 
 ## Build
 
-Clone this fork and enter its directory:
+Clone this monorepo and enter the iOS directory:
 
 ```sh
 git clone https://github.com/Mrc527/PurpleHaze.git
-cd PurpleHaze
+cd PurpleHaze/ios
 ```
 
 Build dependencies and the app:

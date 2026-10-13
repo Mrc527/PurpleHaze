@@ -1,10 +1,10 @@
-/* ISC license; see iodine/LICENSE. VpnService owns the raw-IP TUN descriptor. */
+/* ISC license; see ../../vendor/iodine/LICENSE. VpnService owns the raw-IP TUN descriptor. */
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
-#include "iodine/src/tun.h"
+#include "tun.h"
 #include "android-tun.h"
 struct android_tun_config android_tun;
 int open_tun(const char *name) { (void)name; return -1; }

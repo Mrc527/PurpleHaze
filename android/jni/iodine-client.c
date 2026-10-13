@@ -1,4 +1,4 @@
-/* ISC license; see iodine/LICENSE. One native session, owned by the VPN worker. */
+/* ISC license; see ../../vendor/iodine/LICENSE. One native session, owned by the VPN worker. */
 #include <jni.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -7,9 +7,9 @@
 #include <unistd.h>
 #include <netdb.h>
 #include <openssl/crypto.h>
-#include "iodine/src/common.h"
-#include "iodine/src/client.h"
-#include "iodine/src/encoding.h"
+#include "common.h"
+#include "client.h"
+#include "encoding.h"
 #include "android-tun.h"
 static int dns_fd = -1;
 static char *domain;
@@ -98,7 +98,7 @@ JNIEXPORT jint JNICALL Java_ch_visin_purplehaze_NativeTunnel_tunnel(JNIEnv *env,
     return client_tunnel(fd, dns_fd);
 }
 JNIEXPORT void JNICALL Java_ch_visin_purplehaze_NativeTunnel_tunnelInterrupt(JNIEnv *env, jclass cls) {
-    client_stop(); /* Atomic in the vendored Android adapter. Worker closes descriptors. */
+    client_stop(); /* Atomic in the shared client engine. Worker closes descriptors. */
 }
 JNIEXPORT void JNICALL Java_ch_visin_purplehaze_NativeTunnel_cleanup(JNIEnv *env, jclass cls) { cleanup(); }
 JNIEXPORT jstring JNICALL Java_ch_visin_purplehaze_NativeTunnel_getIp(JNIEnv *env, jclass cls) {

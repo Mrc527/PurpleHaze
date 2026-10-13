@@ -1,0 +1,40 @@
+# Local credentials, signing configuration and provisioning material.
+**/CodeSigning.xcconfig
+**/local.properties
+*.key
+*.keystore
+*.jks
+*.p12
+*.p8
+*.mobileprovision
+*.provisionprofile
+.env
+.env.*
+!.env.example
+
+# Generated dependencies and build products; also match local directory symlinks.
+.deps
+.gradle
+.cxx
+build
+build-ios
+/artifacts/
+DerivedData
+*.xcarchive
+*.xcresult
+*.apk
+*.aab
+*.ipa
+*.o
+*.a
+*.so
+*.dylib
+*.dSYM
+__pycache__
+*.pyc
+
+# Per-user IDE and desktop state.
+.DS_Store
+.idea
+*.iml
+**/xcuserdata

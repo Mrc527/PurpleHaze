@@ -1,0 +1,16 @@
+name: Android CI
+on:
+  push:
+    branches: [main]
+    paths: ['android/**', 'vendor/**', 'scripts/**', 'tools/**', '.github/workflows/**']
+  pull_request:
+    paths: ['android/**', 'vendor/**', 'scripts/**', 'tools/**', '.github/workflows/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: android-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  validate:
+    uses: ./.github/workflows/build-android.yml

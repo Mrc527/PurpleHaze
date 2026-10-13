@@ -72,8 +72,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
-		A10000000000000000000002 /* secure.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = secure.c; path = vendor/iodine/src/secure.c; sourceTree = SOURCE_ROOT; };
-		A10000000000000000000004 /* compat.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = compat.c; path = vendor/iodine/src/compat.c; sourceTree = SOURCE_ROOT; };
+		A10000000000000000000002 /* secure.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = secure.c; path = ../vendor/iodine/src/secure.c; sourceTree = SOURCE_ROOT; };
+		A10000000000000000000004 /* compat.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = compat.c; path = ../vendor/iodine/src/compat.c; sourceTree = SOURCE_ROOT; };
 		A10000000000000000000006 /* Extension/Credentials.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Extension/Credentials.swift; sourceTree = SOURCE_ROOT; };
 		A10000000000000000000009 /* ThirdPartyNotices.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = ThirdPartyNotices.txt; sourceTree = SOURCE_ROOT; };
 		CE996E5E26FFF94E005E4AC2 /* Settings.bundle */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.plug-in"; path = Settings.bundle; sourceTree = "<group>"; };
@@ -84,26 +84,26 @@
 		CED110DD26FBAE7F005B6445 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		CED110E026FBAE7F005B6445 /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		CED110E226FBAE7F005B6445 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		CED110ED26FBAFA8005B6445 /* md5.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = md5.h; path = vendor/iodine/src/md5.h; sourceTree = "<group>"; };
-		CED110EF26FBAFA8005B6445 /* encoding.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = encoding.h; path = vendor/iodine/src/encoding.h; sourceTree = "<group>"; };
-		CED110F026FBAFA8005B6445 /* dns.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = dns.h; path = vendor/iodine/src/dns.h; sourceTree = "<group>"; };
-		CED110F126FBAFA8005B6445 /* util.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; name = util.c; path = vendor/iodine/src/util.c; sourceTree = "<group>"; };
-		CED110F226FBAFA8005B6445 /* base64.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; name = base64.c; path = vendor/iodine/src/base64.c; sourceTree = "<group>"; };
-		CED110F326FBAFA8005B6445 /* dns.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; name = dns.c; path = vendor/iodine/src/dns.c; sourceTree = "<group>"; };
-		CED110F426FBAFA9005B6445 /* common.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; name = common.c; path = vendor/iodine/src/common.c; sourceTree = "<group>"; };
-		CED110F526FBAFA9005B6445 /* login.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = login.h; path = vendor/iodine/src/login.h; sourceTree = "<group>"; };
-		CED110F626FBAFA9005B6445 /* read.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; name = read.c; path = vendor/iodine/src/read.c; sourceTree = "<group>"; };
-		CED110F826FBAFA9005B6445 /* read.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = read.h; path = vendor/iodine/src/read.h; sourceTree = "<group>"; };
-		CED110FA26FBAFA9005B6445 /* base128.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; name = base128.c; path = vendor/iodine/src/base128.c; sourceTree = "<group>"; };
-		CED110FB26FBAFA9005B6445 /* client.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = client.h; path = vendor/iodine/src/client.h; sourceTree = "<group>"; };
-		CED110FC26FBAFA9005B6445 /* base32.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; name = base32.c; path = vendor/iodine/src/base32.c; sourceTree = "<group>"; };
-		CED110FD26FBAFA9005B6445 /* login.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; name = login.c; path = vendor/iodine/src/login.c; sourceTree = "<group>"; };
-		CED110FE26FBAFA9005B6445 /* client.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; name = client.c; path = vendor/iodine/src/client.c; sourceTree = "<group>"; };
-		CED110FF26FBAFA9005B6445 /* common.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = common.h; path = vendor/iodine/src/common.h; sourceTree = "<group>"; };
-		CED1110026FBAFA9005B6445 /* util.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = util.h; path = vendor/iodine/src/util.h; sourceTree = "<group>"; };
-		CED1110126FBAFA9005B6445 /* encoding.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; name = encoding.c; path = vendor/iodine/src/encoding.c; sourceTree = "<group>"; };
-		CED1110226FBAFA9005B6445 /* md5.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; name = md5.c; path = vendor/iodine/src/md5.c; sourceTree = "<group>"; };
-		CED1111626FBB19D005B6445 /* tun.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = tun.h; path = vendor/iodine/src/tun.h; sourceTree = "<group>"; };
+		CED110ED26FBAFA8005B6445 /* md5.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = md5.h; path = ../vendor/iodine/src/md5.h; sourceTree = "<group>"; };
+		CED110EF26FBAFA8005B6445 /* encoding.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = encoding.h; path = ../vendor/iodine/src/encoding.h; sourceTree = "<group>"; };
+		CED110F026FBAFA8005B6445 /* dns.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = dns.h; path = ../vendor/iodine/src/dns.h; sourceTree = "<group>"; };
+		CED110F126FBAFA8005B6445 /* util.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; name = util.c; path = ../vendor/iodine/src/util.c; sourceTree = "<group>"; };
+		CED110F226FBAFA8005B6445 /* base64.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; name = base64.c; path = ../vendor/iodine/src/base64.c; sourceTree = "<group>"; };
+		CED110F326FBAFA8005B6445 /* dns.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; name = dns.c; path = ../vendor/iodine/src/dns.c; sourceTree = "<group>"; };
+		CED110F426FBAFA9005B6445 /* common.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; name = common.c; path = ../vendor/iodine/src/common.c; sourceTree = "<group>"; };
+		CED110F526FBAFA9005B6445 /* login.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = login.h; path = ../vendor/iodine/src/login.h; sourceTree = "<group>"; };
+		CED110F626FBAFA9005B6445 /* read.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; name = read.c; path = ../vendor/iodine/src/read.c; sourceTree = "<group>"; };
+		CED110F826FBAFA9005B6445 /* read.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = read.h; path = ../vendor/iodine/src/read.h; sourceTree = "<group>"; };
+		CED110FA26FBAFA9005B6445 /* base128.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; name = base128.c; path = ../vendor/iodine/src/base128.c; sourceTree = "<group>"; };
+		CED110FB26FBAFA9005B6445 /* client.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = client.h; path = ../vendor/iodine/src/client.h; sourceTree = "<group>"; };
+		CED110FC26FBAFA9005B6445 /* base32.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; name = base32.c; path = ../vendor/iodine/src/base32.c; sourceTree = "<group>"; };
+		CED110FD26FBAFA9005B6445 /* login.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; name = login.c; path = ../vendor/iodine/src/login.c; sourceTree = "<group>"; };
+		CED110FE26FBAFA9005B6445 /* client.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; name = client.c; path = ../vendor/iodine/src/client.c; sourceTree = "<group>"; };
+		CED110FF26FBAFA9005B6445 /* common.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = common.h; path = ../vendor/iodine/src/common.h; sourceTree = "<group>"; };
+		CED1110026FBAFA9005B6445 /* util.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = util.h; path = ../vendor/iodine/src/util.h; sourceTree = "<group>"; };
+		CED1110126FBAFA9005B6445 /* encoding.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; name = encoding.c; path = ../vendor/iodine/src/encoding.c; sourceTree = "<group>"; };
+		CED1110226FBAFA9005B6445 /* md5.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; name = md5.c; path = ../vendor/iodine/src/md5.c; sourceTree = "<group>"; };
+		CED1111626FBB19D005B6445 /* tun.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = tun.h; path = ../vendor/iodine/src/tun.h; sourceTree = "<group>"; };
 		CED1111F26FBB365005B6445 /* tun-shim.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "tun-shim.c"; sourceTree = "<group>"; };
 		CED1112626FBB55F005B6445 /* Build.xcconfig */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.xcconfig; path = Build.xcconfig; sourceTree = "<group>"; };
 		CED1112A26FBB5AB005B6445 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };

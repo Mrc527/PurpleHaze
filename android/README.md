@@ -47,7 +47,7 @@ routing; this build does not implement always-on VPN or a persistent kill switch
 
 Install JDK 17, Android SDK platform 35, Android build tools 35.0.0 and
 NDK `29.0.14206865`. Point `local.properties` at your SDK (`sdk.dir=...`).
-On macOS or Linux:
+On macOS or Linux, run these commands from `android/` in this monorepo:
 
 ```sh
 export JAVA_HOME=/path/to/jdk-17
@@ -96,7 +96,8 @@ and direct-UDP mode (HTTPS, UDP DNS, public egress IP and IPv6 blocking).
 Physical devices, older Android versions and long-duration sessions still need
 verification. Lint has no errors; remaining warnings concern tool versions, compatibility checks and launcher metadata.
 
-Native source provenance is recorded in [jni/iodine/README.android.md](jni/iodine/README.android.md).
+Native source provenance is recorded in [the shared iodine engine](../vendor/iodine/README.md).
+Both apps compile that single source tree; the JNI adapters remain under `jni/`.
 The original German manuals in `doc/` describe the upstream legacy client.
 OpenSSL's license is in [third-party/LICENSE-OpenSSL.txt](third-party/LICENSE-OpenSSL.txt)
 and the app's About dialog.
@@ -121,7 +122,7 @@ OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
 PERFORMANCE OF THIS SOFTWARE.
 
 
-MD5 implementation by L. Peter Deutsch (license and source in jni/iodine/src/md5.[ch])  
+MD5 implementation by L. Peter Deutsch (license and source in ../vendor/iodine/src/md5.[ch])
 Copyright (C) 1999, 2000, 2002 Aladdin Enterprises.  All rights reserved.
 
 Branding/icon attribution: [PurpleHaze](https://github.com/DullJZ/PurpleHaze), Apache 2.0; see `third-party/LICENSE-PurpleHaze.txt` and in-app notices.

@@ -1,0 +1,28 @@
+PurpleHaze monorepo — license overview
+
+This repository combines independently licensed components. Moving them into
+one repository does not replace their licenses or relicense their history.
+The following files contain the applicable original terms and notices:
+
+* iOS PurpleHaze application: Apache License 2.0; see ios/LICENSE and
+  ios/ThirdPartyNotices.txt. Original copyright notices remain in the sources.
+
+* Android AndIodine-derived application: ISC-style terms, described by its
+  upstream as "the same terms as iodine"; see android/README.md and the full
+  notice in android/src/main/res/raw/license. PurpleHaze branding and icon
+  contributions carry Apache License 2.0 notices in
+  android/third-party/LICENSE-PurpleHaze.txt.
+
+* Shared iodine engine: ISC; see vendor/iodine/LICENSE. Individual third-party
+  source notices, including the MD5 implementation and DNS definitions, remain
+  in vendor/iodine/src and are not superseded by this overview.
+
+* Statically linked OpenSSL: Apache License 2.0; see
+  android/third-party/LICENSE-OpenSSL.txt and ios/ThirdPartyNotices.txt.
+  OpenSSL sources and generated libraries are fetched/built locally or in CI.
+
+* Additional platform notices are retained in the app About views and bundled
+  notice files. Refer to each named component's notice for its copyright holders
+  and complete terms.
+
+No blanket monorepo license is substituted for these component licenses.

@@ -1,4 +1,4 @@
-/* ISC license; see iodine/LICENSE. Credentials are never included in messages. */
+/* ISC license; see ../../vendor/iodine/LICENSE. Credentials are never included in messages. */
 #include "android-log.h"
 #include <android/log.h>
 #include <stdarg.h>
