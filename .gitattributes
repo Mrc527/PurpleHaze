@@ -8,3 +8,6 @@ android/gradlew.bat text eol=crlf
 *.png binary
 *.jpg binary
 *.jar binary
+
+# The shared source manifest hashes canonical LF bytes on every platform.
+vendor/iodine/** text eol=lf
