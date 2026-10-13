@@ -1,441 +1,173 @@
-//
-// Copyright © 2021 osy. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-//
-
+// Copyright © 2021 osy. Licensed under the Apache License, Version 2.0.
 import UIKit
 import NetworkExtension
 
-class ViewController: UIViewController {
-    @IBOutlet var topDomainTextField: UITextField!
-    @IBOutlet var passwordTextField: UITextField!
-    @IBOutlet var sharedKeyTextField: UITextField!
-    @IBOutlet var logTextView: UITextView!
-    @IBOutlet var vpnStartSwitch: UISwitch!
-    @IBOutlet var serverProxySwitch: UISwitch!
-    @IBOutlet var activityIndicator: UIActivityIndicatorView!
-    
-    private var credentialsLoaded = false
-    var vpnObserver: Any?
-    var vpnManager: NEVPNManager? {
-        didSet {
-            guard let manager = vpnManager else {
-                vpnObserver = nil
-                return
-            }
-            vpnObserver = NotificationCenter.default.addObserver(forName: .NEVPNStatusDidChange, object: manager.connection, queue: nil, using: { [weak self] _ in
-                guard let _self = self else {
-                    return
-                }
-                if manager.connection.status == .connecting {
-                    _self.vpnWillConnect(for: manager)
-                } else if manager.connection.status == .disconnecting {
-                    _self.vpnWillDisconnect(for: manager)
-                } else if manager.connection.status == .disconnected {
-                    _self.vpnDidDisconnect(for: manager)
-                } else if manager.connection.status == .connected {
-                    _self.vpnDidConnect(for: manager)
-                }
-            })
-        }
+@MainActor
+final class ViewController: UIViewController {
+    private var store: ProfileStore?
+    private var manager: NETunnelProviderManager?
+    private var working = true
+    private var content: UIStackView!
+    private var observers: [NSObjectProtocol] = []
+    private var tunnelBundleID: String { Bundle.main.bundleIdentifier! + ".Iodine" }
+    private var busy: Bool {
+        working || [.connecting, .connected, .reasserting, .disconnecting].contains(manager?.connection.status ?? .invalid)
     }
-    
-    var lastLogIndex: UInt64 = 0
-    
     override func viewDidLoad() {
-        super.viewDidLoad()
-        topDomainTextField.text = UserDefaults.standard.string(forKey: IodineSettings.topDomain)
-        do {
-            // Migrate the original app's password out of preferences.
-            if let old = UserDefaults.standard.string(forKey: IodineSettings.password) {
-                try Credentials.save(Data(old.utf8), account: Credentials.password)
-                UserDefaults.standard.removeObject(forKey: IodineSettings.password)
-            }
-            if let password = try Credentials.read(Credentials.password) {
-                passwordTextField.text = String(data: password, encoding: .utf8)
-            }
-            if UserDefaults.standard.bool(forKey: IodineSettings.encrypted) {
-                guard let key = try Credentials.read(Credentials.sharedKey), key.count == 32 else {
-                    throw NSError(domain: "Iodine", code: 1, userInfo: [NSLocalizedDescriptionKey:
-                        "The saved encryption key is unavailable. Restore Keychain access before connecting."])
-                }
-                sharedKeyTextField.text = key.base64EncodedString()
-            }
-            credentialsLoaded = true
-        } catch { showError(error) }
-        serverProxySwitch.isOn = UserDefaults.standard.bool(forKey: IodineSettings.serverProxy)
-        serverProxySwitch.accessibilityLabel = "Server proxy for TCP, UDP and DNS. Requires a shared key."
-        sharedKeyTextField.autocapitalizationType = .none
-        sharedKeyTextField.accessibilityLabel = "Shared key in Base64. Leave empty for legacy mode."
-        
-        // 配置日志视图样式
-        logTextView.backgroundColor = UIColor.systemGray6
-        logTextView.layer.borderColor = UIColor.systemGray4.cgColor
-        logTextView.layer.borderWidth = 1.0
-        logTextView.layer.cornerRadius = 8.0
-        logTextView.font = UIFont.monospacedSystemFont(ofSize: 10, weight: .regular)
-        logTextView.textColor = UIColor.label
-        logTextView.isEditable = false
-        
-        logToUI("App started")
-        initVpn()
-        refreshLog()
-    }
-    
-    func logToUI(_ message: String) {
-        let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
-        let logMessage = "[\(timestamp)] \(message)\n"
-        DispatchQueue.main.async {
-            self.logTextView.text += logMessage
-            self.logTextView.scrollToBottom()
-        }
-    }
-    
-    func showError(message: String?) {
-        let alertMessage = message ?? NSLocalizedString("An error has occurred.", comment: "Main")
-        logToUI("ERROR: \(alertMessage)")
-        DispatchQueue.main.async {
-            let alert = UIAlertController(title: nil, message: alertMessage, preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: NSLocalizedString("OK", comment: "Main"), style: .default, handler: nil))
-            self.present(alert, animated: true)
-            self.vpnStartSwitch.isOn = self.vpnManager?.connection.status == .connected
-        }
-    }
-
-    func showError(_ error: Error?) {
-        showError(message: error?.localizedDescription)
-    }
-    
-    @IBAction func advancedSettingsPressed(_ sender: Any) {
-        if let url = URL(string: UIApplication.openSettingsURLString) {
-            UIApplication.shared.open(url, options: [:], completionHandler: nil)
-        }
-    }
-    
-    @IBAction func helpButtonPressed(_ sender: Any) {
-        if let url = URL(string: "https://github.com/osy/PurpleHaze") {
-            UIApplication.shared.open(url, options: [:], completionHandler: nil)
-        }
-    }
-    
-    @IBAction func serverProxyChanged(_ sender: UISwitch) {
-        // Apply on the next connection; changing an active route silently is unsafe.
-        UserDefaults.standard.set(sender.isOn, forKey: IodineSettings.serverProxy)
-        if vpnManager?.connection.status == .connected {
-            logToUI("Proxy preference saved. Reconnect to apply it.")
-        }
-    }
-
-    @IBAction func vpnStartSwitchChanged(_ sender: Any) {
-        if vpnStartSwitch.isOn {
-            clearLog()
-            logToUI("VPN switch turned ON")
-            guard let topdomain = topDomainTextField.text, topdomain.count > 0 else {
-                showError(message: NSLocalizedString("You must specify a top domain.", comment: "ViewController"))
-                vpnStartSwitch.isOn = false
-                return
-            }
-            logToUI("Top domain: \(topdomain)")
-            UserDefaults.standard.set(topdomain, forKey: IodineSettings.topDomain)
-            do {
-                let keyText = (sharedKeyTextField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                if serverProxySwitch.isOn && keyText.isEmpty {
-                    showError(message: "Server proxy requires the server’s shared key and encrypted mode.")
-                    vpnStartSwitch.isOn = false
-                    return
-                }
-                UserDefaults.standard.set(serverProxySwitch.isOn, forKey: IodineSettings.serverProxy)
-                if keyText.isEmpty {
-                    let password = Data((passwordTextField.text ?? "").utf8)
-                    guard password.count <= 32 else {
-                        showError(message: "Legacy passwords must contain at most 32 UTF-8 bytes.")
-                        return
-                    }
-                    try Credentials.save(password, account: Credentials.password)
-                    try Credentials.remove(Credentials.sharedKey)
-                } else {
-                    guard let key = Data(base64Encoded: keyText), key.count == 32 else {
-                        showError(message: "Enter the Base64 representation of the server’s 32-byte key.")
-                        return
-                    }
-                    try Credentials.save(key, account: Credentials.sharedKey)
-                }
-                UserDefaults.standard.set(!keyText.isEmpty, forKey: IodineSettings.encrypted)
-                logToUI(keyText.isEmpty ? "Legacy connection (unencrypted)" : "Encrypted connection required")
-            } catch {
-                showError(error)
-                return
-            }
-            setupVpn(with: vpnManager)
-        } else {
-            logToUI("VPN switch turned OFF")
-            guard let vpnManager = vpnManager else {
-                return
-            }
-            stopTunnel(with: vpnManager)
-        }
-    }
-    
-    @IBAction func dismissTextField(_ sender: Any) {
-    }
-}
-
-extension ViewController {
-    var tunnelBundleId: String {
-        Bundle.main.bundleIdentifier!.appending(".Iodine")
-    }
-    
-    func initVpn(onExistingManager: @escaping (NEVPNManager) -> () = { _ in }) {
-        logToUI("Initializing VPN manager...")
-        DispatchQueue.main.async {
-            self.vpnStartSwitch.isEnabled = false
-        }
+        super.viewDidLoad(); title = "PurpleHaze"
+        navigationItem.rightBarButtonItem = UIBarButtonItem(title: "About", style: .plain, target: self, action: #selector(about))
+        content = Brand.content(in: self)
+        do { store = try ProfileStore() } catch { DispatchQueue.main.async { Brand.error(error, on: self) } }
+        observers.append(NotificationCenter.default.addObserver(forName: .NEVPNStatusDidChange, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.render(); self?.reconcileManager() }
+        })
+        observers.append(NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.render(); self?.reconcileManager() }
+        })
+        render()
         Task {
             do {
-                let managers = try await NETunnelProviderManager.loadAllFromPreferences()
-                await MainActor.run {
-                    self.logToUI("Found \(managers.count) VPN configuration(s)")
-                }
-                if let manager = managers.first(where: { ($0.protocolConfiguration as? NETunnelProviderProtocol)?.providerBundleIdentifier == self.tunnelBundleId }) {
-                    await MainActor.run {
-                        self.vpnManager = manager
-                        self.logToUI("VPN manager loaded successfully. Protocol: \(manager.protocolConfiguration?.description ?? "nil")")
-                    }
-                }
-                await MainActor.run {
-                    let status = self.vpnManager?.connection.status ?? .invalid
-                    self.logToUI("VPN status: \(self.statusString(status))")
-                    self.vpnStartSwitch.isOn = status == .connected
-                    self.vpnStartSwitch.isEnabled = self.credentialsLoaded
-                }
-                if let manager = self.vpnManager {
-                    onExistingManager(manager)
-                }
-            } catch {
-                await MainActor.run {
-                    self.logToUI("ERROR loading VPN manager: \(error.localizedDescription)")
-                    self.vpnStartSwitch.isEnabled = self.credentialsLoaded
-                    self.showError(error)
-                }
-            }
+                manager = try await NETunnelProviderManager.loadAllFromPreferences().first { ($0.protocolConfiguration as? NETunnelProviderProtocol)?.providerBundleIdentifier == tunnelBundleID }
+            } catch { Brand.error(error, on: self) }
+            working = false; render(); reconcileManager()
         }
     }
-    
-    func statusString(_ status: NEVPNStatus) -> String {
+    deinit { observers.forEach { NotificationCenter.default.removeObserver($0) } }
+    private func render() {
+        guard content != nil else { return }
+        content.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        let header = UIStackView(); header.spacing = 14; header.alignment = .center
+        let icon = UIImageView(image: UIImage(named: "BrandMark")); icon.contentMode = .scaleAspectFit; icon.layer.cornerRadius = 16; icon.clipsToBounds = true
+        NSLayoutConstraint.activate([icon.widthAnchor.constraint(equalToConstant: 64), icon.heightAnchor.constraint(equalToConstant: 64)])
+        header.addArrangedSubview(icon); header.addArrangedSubview(Brand.label("Your connection,\nthrough DNS.", .title2)); content.addArrangedSubview(header)
+        let status = manager?.connection.status ?? .disconnected
+        let connected = [.connected, .connecting, .reasserting, .disconnecting].contains(status)
+        let activeID = (manager?.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration?[IodineSettings.profileID] as? String
+        let selected = store?.selectedProfile
+        let displayed = connected ? store?.profiles.first(where: { $0.id == activeID }) : selected
+        let card = Brand.card(in: content)
+        let statusText: String
         switch status {
-        case .invalid: return "Invalid"
-        case .disconnected: return "Disconnected"
-        case .connecting: return "Connecting"
-        case .connected: return "Connected"
-        case .reasserting: return "Reasserting"
-        case .disconnecting: return "Disconnecting"
-        @unknown default: return "Unknown"
+        case .connected: statusText = "Connected"
+        case .connecting: statusText = "Connecting…"
+        case .reasserting: statusText = "Reconnecting…"
+        case .disconnecting: statusText = "Disconnecting…"
+        default: statusText = working ? "Preparing…" : "Disconnected"
         }
-    }
-    
-    func setupVpn(with manager: NEVPNManager? = nil) {
-        if let manager = manager {
-            logToUI("Using existing VPN configuration")
-            startExistingTunnel(with: manager)
-        } else {
-            logToUI("Creating new VPN configuration")
-            createAndStartTunnel()
+        card.addArrangedSubview(Brand.label(statusText, .title2, color: Brand.purple))
+        card.addArrangedSubview(Brand.label(displayed?.name ?? (connected ? "Previous configuration" : "Choose a profile to begin"), .headline))
+        if let profile = displayed {
+            card.addArrangedSubview(Brand.label(profile.topDomain, .subheadline, color: Brand.muted))
+            card.addArrangedSubview(Brand.label((profile.encrypted ? "Encrypted" : "Legacy · unencrypted") + (profile.serverProxy ? "  •  Server proxy" : ""), .footnote, color: Brand.muted))
         }
+        let connect = Brand.button(connected ? "Disconnect" : "Connect", primary: true) { [weak self] in self?.toggleConnection() }
+        connect.isEnabled = !working && status != .disconnecting && (connected || selected != nil)
+        card.addArrangedSubview(connect)
+        content.addArrangedSubview(Brand.label("Profiles", .title2))
+        if store == nil { content.addArrangedSubview(Brand.label("Profiles could not be loaded. Existing data has been preserved.", .body)) }
+        else if store!.profiles.isEmpty { content.addArrangedSubview(Brand.label("Add a server and save its connection settings in a profile.", .body, color: Brand.muted)) }
+        for profile in store?.profiles ?? [] {
+            let row = Brand.card(in: content)
+            row.addArrangedSubview(Brand.label((profile.id == selected?.id ? "✓  " : "") + profile.name, .headline))
+            row.addArrangedSubview(Brand.label(profile.topDomain, .subheadline, color: Brand.muted))
+            row.addArrangedSubview(Brand.label((profile.encrypted ? "Encrypted" : "Legacy") + (profile.serverProxy ? " • Proxy" : ""), .footnote, color: Brand.muted))
+            let actions = UIStackView(); actions.spacing = 10; actions.distribution = .fillEqually
+            let select = Brand.button(profile.id == selected?.id ? "Selected" : "Select") { [weak self] in self?.select(profile.id) }
+            let edit = Brand.button("Edit") { [weak self] in self?.edit(profile) }
+            select.accessibilityIdentifier = "profile.select.\(profile.name)"; edit.accessibilityIdentifier = "profile.edit.\(profile.name)"
+            select.isEnabled = !busy && profile.id != selected?.id; edit.isEnabled = !busy
+            actions.addArrangedSubview(select); actions.addArrangedSubview(edit); row.addArrangedSubview(actions)
+        }
+        let add = Brand.button("New profile") { [weak self] in self?.edit(nil) }; add.accessibilityIdentifier = "profile.new"; add.isEnabled = !busy && store != nil; content.addArrangedSubview(add)
+        if connected { content.addArrangedSubview(Brand.label("Disconnect before changing profiles or connection settings.", .footnote, color: Brand.muted)) }
+        content.addArrangedSubview(Brand.button("Connection log") { [weak self] in self?.showLog() })
     }
-    
-    func createAndStartTunnel() {
+    private func select(_ id: String) {
+        guard !busy, let store else { return }
+        do { try store.select(id); profilesChanged() } catch { Brand.error(error, on: self) }
+    }
+    private func edit(_ profile: ConnectionProfile?) {
+        guard !busy, let store else { return }
+        let editor = ProfileEditor(store: store, profile: profile, canEdit: { [weak self] in self?.busy == false }) { [weak self] in self?.profilesChanged() }
+        let navigation = UINavigationController(rootViewController: editor); navigation.isModalInPresentation = true
+        present(navigation, animated: true)
+    }
+    private func reconcileManager() {
+        guard !busy, let manager else { return }
+        let snapshot = (manager.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration ?? [:]
+        if let profile = store?.selectedProfile {
+            if snapshot[IodineSettings.profileID] as? String != profile.id || snapshot[IodineSettings.credentialRevision] as? String != profile.credentialRevision { profilesChanged() }
+        } else if store != nil { profilesChanged() }
+    }
+    private func profilesChanged() {
+        render()
+        guard !busy, let manager else { return }
+        working = true; render()
         Task {
-            let manager = NETunnelProviderManager()
-            manager.localizedDescription = NSLocalizedString("Iodine DNS Tunnel", comment: "Main")
-            let proto = NETunnelProviderProtocol()
-            proto.providerBundleIdentifier = tunnelBundleId
-            proto.serverAddress = "255.255.255.255"
-            manager.protocolConfiguration = proto
-            manager.isEnabled = true
-            await MainActor.run {
-                self.logToUI("Saving VPN configuration...")
-            }
             do {
-                try await manager.saveToPreferences()
-                await MainActor.run {
-                    self.logToUI("VPN configuration saved")
-                    self.initVpn(onExistingManager: self.startExistingTunnel)
-                }
-            } catch {
-                await MainActor.run {
-                    self.showError(error)
-                }
-            }
+                if let profile = store?.selectedProfile {
+                    configure(manager, profile: profile)
+                    try await manager.saveToPreferences(); try await manager.loadFromPreferences()
+                } else { try await manager.removeFromPreferences(); self.manager = nil }
+            } catch { Brand.error(error, on: self) }
+            working = false; render()
         }
     }
-    
-    func startExistingTunnel(with manager: NEVPNManager) {
-        logToUI("Starting VPN tunnel...")
-        if manager.connection.status == .connected {
-            logToUI("VPN already connected")
-            return
+    private func configure(_ manager: NETunnelProviderManager, profile: ConnectionProfile) {
+        let config = NETunnelProviderProtocol(); config.providerBundleIdentifier = tunnelBundleID
+        config.serverAddress = profile.topDomain; config.providerConfiguration = profile.options
+        manager.protocolConfiguration = config; manager.localizedDescription = "PurpleHaze — " + profile.name; manager.isEnabled = true
+    }
+    private func toggleConnection() {
+        guard !working else { return }
+        if busy { manager?.connection.stopVPNTunnel(); render(); return }
+        guard let store, let profile = store.selectedProfile else { return }
+        do { try profile.validate(); _ = try store.secrets(for: profile) } catch { Brand.error(error, on: self); return }
+        working = true; render()
+        Task {
+            do {
+                let manager = self.manager ?? NETunnelProviderManager(); self.manager = manager
+                configure(manager, profile: profile)
+                try await manager.saveToPreferences(); try await manager.loadFromPreferences()
+                guard let connection = manager.connection as? NETunnelProviderSession else { throw Brand.failure("VPN session is unavailable.") }
+                try connection.startVPNTunnel(options: profile.options)
+            } catch { Brand.error(error, on: self) }
+            working = false; render()
         }
-        
-        // Filter options to only include Iodine settings
-        let allOptions = UserDefaults.standard.dictionaryRepresentation()
-        let iodineKeys: Set<String> = [
-            IodineSettings.topDomain,
-            IodineSettings.encrypted,
-            IodineSettings.serverProxy,
-            IodineSettings.nameserverHost,
-            IodineSettings.ipv6Support,
-            IodineSettings.maxDownstreamFragmentSize,
-            IodineSettings.rawMode,
-            IodineSettings.lazyMode,
-            IodineSettings.selectTimeout,
-            IodineSettings.hostnameMaxLength,
-            IodineSettings.forceDnsType,
-            IodineSettings.forceEncoding,
-            IodineSettings.dnsServer,
-            IodineSettings.pacConfigUrl,
-            IodineSettings.pacJavascript,
-            IodineSettings.httpProxyServer,
-            IodineSettings.httpProxyPort,
-            IodineSettings.httpsProxyServer,
-            IodineSettings.httpsProxyPort
-        ]
-        
-        let options = allOptions.filter { iodineKeys.contains($0.key) }.mapValues { $0 as! NSObject }
-        
-        logToUI("Starting tunnel with options: \(options.keys.joined(separator: ", "))")
+    }
+    private func showLog() { present(UINavigationController(rootViewController: ConnectionLogController()), animated: true) }
+    @objc private func about() {
+        let alert = UIAlertController(title: "PurpleHaze", message: "A DNS tunnel client for your iodine server.\n\nBased on PurpleHaze by osy and DullJZ. Android edition based on AndIodine by xapek.\n\nPurpleHaze: Apache 2.0\niodine: ISC\nOpenSSL: Apache 2.0\nhev-socks5-tunnel: MIT", preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default)); present(alert, animated: true)
+    }
+}
+
+@MainActor
+private final class ConnectionLogController: UIViewController {
+    private let text = UITextView()
+    private var timer: Timer?
+    override func viewDidLoad() {
+        super.viewDidLoad(); title = "Connection log"; view.backgroundColor = Brand.canvas
+        navigationItem.rightBarButtonItem = UIBarButtonItem(title: "Done", style: .done, target: self, action: #selector(done))
+        text.isEditable = false; text.font = .monospacedSystemFont(ofSize: 12, weight: .regular); text.backgroundColor = Brand.canvas; text.textColor = Brand.ink
+        text.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(text)
+        NSLayoutConstraint.activate([text.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor), text.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12), text.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12), text.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor)])
+    }
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated); refresh()
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in Task { @MainActor in self?.refresh() } }
+    }
+    override func viewDidDisappear(_ animated: Bool) { super.viewDidDisappear(animated); timer?.invalidate(); timer = nil }
+    private func refresh() {
+        guard let identifier = Bundle.main.bundleIdentifier,
+              let url = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group." + identifier)?.appendingPathComponent("log.txt"),
+              let handle = try? FileHandle(forReadingFrom: url) else { text.text = "No connection log yet."; return }
+        defer { try? handle.close() }
         do {
-            try manager.connection.startVPNTunnel(options: options)
-            logToUI("VPN tunnel start requested")
-        } catch NEVPNError.configurationDisabled {
-            let msg = NSLocalizedString("VPN has been disabled in settings or another VPN configuration is selected.", comment: "Main")
-            logToUI("ERROR: \(msg)")
-            showError(message: msg)
-            return
-        } catch NEVPNError.configurationInvalid {
-            let msg = NSLocalizedString("VPN configuration is invalid.", comment: "Main")
-            logToUI("ERROR: \(msg)")
-            showError(message: msg)
-            vpnManager = nil
-            return
-        } catch {
-            logToUI("ERROR starting tunnel: \(error.localizedDescription)")
-            showError(error)
-            return
-        }
+            let size = try handle.seekToEnd(); try handle.seek(toOffset: size > 65536 ? size - 65536 : 0)
+            let data = try handle.readToEnd() ?? Data(); let value = String(decoding: data, as: UTF8.self)
+            if text.text != value { text.text = value; if !value.isEmpty { text.scrollRangeToVisible(NSRange(location: text.text.utf16.count - 1, length: 1)) } }
+        } catch { text.text = "The connection log is unavailable." }
     }
-    
-    func stopTunnel(with manager: NEVPNManager) {
-        if manager.connection.status == .disconnected {
-            return
-        }
-        
-        manager.connection.stopVPNTunnel()
-    }
-    
-    func vpnWillConnect(for manager: NEVPNManager) {
-        logToUI("VPN connecting...")
-        DispatchQueue.main.async {
-            self.vpnStartSwitch.isOn = true
-            self.vpnStartSwitch.isEnabled = false
-            self.activityIndicator.startAnimating()
-        }
-    }
-    
-    func vpnDidConnect(for manager: NEVPNManager) {
-        logToUI("VPN connected successfully!")
-        DispatchQueue.main.async {
-            self.vpnStartSwitch.isOn = true
-            self.vpnStartSwitch.isEnabled = self.credentialsLoaded
-            self.activityIndicator.stopAnimating()
-        }
-    }
-    
-    func vpnWillDisconnect(for manager: NEVPNManager) {
-        logToUI("VPN disconnecting...")
-        DispatchQueue.main.async {
-            self.vpnStartSwitch.isOn = false
-            self.vpnStartSwitch.isEnabled = false
-            self.activityIndicator.startAnimating()
-        }
-    }
-    
-    func vpnDidDisconnect(for manager: NEVPNManager) {
-        logToUI("VPN disconnected")
-        DispatchQueue.main.async {
-            self.vpnStartSwitch.isOn = false
-            self.vpnStartSwitch.isEnabled = self.credentialsLoaded
-            self.activityIndicator.stopAnimating()
-        }
-    }
-}
-
-extension ViewController {
-    private var logUrl: URL? {
-        guard let bundleId = Bundle.main.bundleIdentifier else {
-            return nil
-        }
-        let groupBundleId = "group." + bundleId
-        let containerUrl = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: groupBundleId)
-        return containerUrl?.appendingPathComponent("log.txt")
-    }
-    
-    private func getNewLogLines() -> String? {
-        guard let logUrl = logUrl else {
-            return nil
-        }
-        guard let handle = try? FileHandle(forReadingFrom: logUrl) else {
-            lastLogIndex = 0
-            return nil
-        }
-        defer {
-            handle.closeFile()
-        }
-        handle.seek(toFileOffset: lastLogIndex)
-        let newlines = String(data: handle.readDataToEndOfFile(), encoding: .utf8)
-        lastLogIndex = handle.offsetInFile
-        return newlines
-    }
-    
-    func clearLog() {
-        guard let logUrl = logUrl else {
-            return
-        }
-        try? FileManager.default.removeItem(at: logUrl)
-        lastLogIndex = 0
-        DispatchQueue.main.async {
-            self.logTextView.text = ""
-        }
-    }
-    
-    func refreshLog() {
-        if let lines = getNewLogLines() {
-            print(lines, terminator: "")
-            if lines.count > 0 {
-                DispatchQueue.main.async {
-                    self.logTextView.text += lines
-                    self.logTextView.scrollToBottom()
-                }
-            }
-        }
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.0, execute: refreshLog)
-    }
-}
-
-extension UITextView {
-    func scrollToBottom() {
-        let textCount: Int = text.count
-        guard textCount >= 1 else { return }
-        scrollRangeToVisible(NSRange(location: textCount - 1, length: 1))
-    }
+    @objc private func done() { dismiss(animated: true) }
 }

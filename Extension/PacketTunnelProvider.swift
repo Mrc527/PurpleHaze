@@ -36,17 +36,23 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         var serverIp: String?
         var subnetMask: String?
         
-        let savedOptions: [String: Any]?
-        if let options = options {
-            let publicOptions = options.filter { $0.key != IodineSettings.password }
-            UserDefaults.standard.set(publicOptions, forKey: IodineSettings.lastSavedSettings)
-            savedOptions = publicOptions
-        } else {
-            savedOptions = UserDefaults.standard.dictionary(forKey: IodineSettings.lastSavedSettings)?.filter {
-                $0.key != IodineSettings.password
-            }
-            UserDefaults.standard.set(savedOptions, forKey: IodineSettings.lastSavedSettings)
-        }
+        // A system-initiated reconnect has no start options. Use the same profile
+        // snapshot persisted on the VPN manager, not another profile's preferences.
+        let configured = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
+        let source: [String: Any]?
+        if let options = options, !options.isEmpty { source = options }
+        else if let configured = configured, !configured.isEmpty { source = configured }
+        else { source = UserDefaults.standard.dictionary(forKey: IodineSettings.lastSavedSettings) }
+        let publicKeys: Set<String> = [IodineSettings.profileID, IodineSettings.credentialRevision,
+            IodineSettings.topDomain, IodineSettings.encrypted, IodineSettings.serverProxy,
+            IodineSettings.nameserverHost, IodineSettings.ipv6Support, IodineSettings.rawMode,
+            IodineSettings.lazyMode, IodineSettings.maxDownstreamFragmentSize, IodineSettings.selectTimeout,
+            IodineSettings.hostnameMaxLength, IodineSettings.forceDnsType, IodineSettings.forceEncoding,
+            IodineSettings.defaultRoute, IodineSettings.dnsMode, IodineSettings.dnsServer,
+            IodineSettings.pacConfigUrl, IodineSettings.pacJavascript, IodineSettings.httpProxyServer,
+            IodineSettings.httpProxyPort, IodineSettings.httpsProxyServer, IodineSettings.httpsProxyPort]
+        let savedOptions = source?.filter { publicKeys.contains($0.key) }
+        UserDefaults.standard.set(savedOptions, forKey: IodineSettings.lastSavedSettings)
         iodine = Iodine(options: savedOptions)
         iodine!.delegate = self
         let mtuObserver = NotificationCenter.default.addObserver(forName: IodineSetMTUNotification as NSNotification.Name, object: nil, queue: nil) { notification in
@@ -84,7 +90,22 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: serverIp)
         let ipv4 = NEIPv4Settings(addresses: [clientIp], subnetMasks: [subnetMask])
-        ipv4.includedRoutes = [.default()]
+        let fullRoute = savedOptions?[IodineSettings.serverProxy] as? Bool == true ||
+            (savedOptions?[IodineSettings.defaultRoute] as? Bool ?? true)
+        if fullRoute {
+            ipv4.includedRoutes = [.default()]
+        } else {
+            let address = clientIp.split(separator: ".").compactMap { UInt8($0) }
+            let mask = subnetMask.split(separator: ".").compactMap { UInt8($0) }
+            guard address.count == 4, mask.count == 4 else {
+                iodine?.stop()
+                iodine = nil
+                completionHandler(IodineError.internalError)
+                return
+            }
+            let network = zip(address, mask).map { String($0 & $1) }.joined(separator: ".")
+            ipv4.includedRoutes = [NEIPv4Route(destinationAddress: network, subnetMask: subnetMask)]
+        }
         settings.ipv4Settings = ipv4
         // iodine carries IPv4 only; capture and discard IPv6 instead of bypassing the tunnel.
         let ipv6 = NEIPv6Settings(addresses: ["fd00::2"], networkPrefixLengths: [128])
@@ -94,7 +115,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         if let mtu = mtu {
             settings.mtu = NSNumber(value: mtu)
         }
-        configureDnsAndProxy(for: settings, with: savedOptions)
+        configureDnsAndProxy(for: settings, with: savedOptions, serverIP: serverIp)
         setTunnelNetworkSettings(settings) { error in
             if error == nil {
                 print("Tunnel started successfully!", to: &StdioRedirect.standardError)
@@ -130,18 +151,28 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
     
-    private func configureDnsAndProxy(for config: NETunnelNetworkSettings, with options: [String: Any]?) {
-        var dnsServer = "8.8.8.8"
-        if let customDns = options?[IodineSettings.dnsServer] as? String, customDns.count > 0 {
-            dnsServer = customDns
+    private func configureDnsAndProxy(for config: NEPacketTunnelNetworkSettings, with options: [String: Any]?, serverIP: String) {
+        let proxyMode = options?[IodineSettings.serverProxy] as? Bool == true
+        let mode = options?[IodineSettings.dnsMode] as? String ?? "custom"
+        let configuredDNS = options?[IodineSettings.dnsServer] as? String ?? "8.8.8.8"
+        let dnsServer: String?
+        if proxyMode { dnsServer = mode == "custom" && !configuredDNS.isEmpty ? configuredDNS : "1.1.1.1" }
+        else if mode == "system" { dnsServer = nil }
+        else if mode == "tunnel" { dnsServer = serverIP }
+        else { dnsServer = configuredDNS.isEmpty ? "1.1.1.1" : configuredDNS }
+        if let dnsServer = dnsServer {
+            print("Network DNS: \(dnsServer)", to: &StdioRedirect.standardError)
+            let dnsSettings = NEDNSSettings(servers: [dnsServer])
+            dnsSettings.matchDomains = [""]
+            config.dnsSettings = dnsSettings
+            // Custom/tunnel DNS must enter packetFlow even with subnet-only routing.
+            let fullRoute = proxyMode || (options?[IodineSettings.defaultRoute] as? Bool ?? true)
+            if !fullRoute {
+                config.ipv4Settings?.includedRoutes?.append(NEIPv4Route(destinationAddress: dnsServer, subnetMask: "255.255.255.255"))
+            }
         }
-        print("Network DNS: \(dnsServer)", to: &StdioRedirect.standardError)
-        let dnsSettings = NEDNSSettings(servers: [dnsServer])
-        dnsSettings.matchDomains = [""] // Route all DNS queries through the tunnel
-        config.dnsSettings = dnsSettings
-        // Full proxy mode converts every tunneled IPv4 TCP/UDP flow on the server.
-        // Provider-created proxy sockets here would bypass packetFlow.
-        if options?[IodineSettings.serverProxy] as? Bool == true { return }
+        // Full proxy mode converts all tunneled IPv4 TCP/UDP on the server.
+        if proxyMode { return }
         let proxy = NEProxySettings()
         if let pacConfigUrl = options?[IodineSettings.pacConfigUrl] as? String, pacConfigUrl.count > 0 {
             proxy.autoProxyConfigurationEnabled = true
@@ -166,6 +197,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             proxy.httpsEnabled = true
             proxy.httpsServer = NEProxyServer(address: httpsProxyServer, port: httpsProxyPort)
             print("Network HTTPS Proxy: \(httpsProxyServer):\(httpsProxyPort)", to: &StdioRedirect.standardError)
+        }
+        if proxy.autoProxyConfigurationEnabled || proxy.httpEnabled || proxy.httpsEnabled {
+            proxy.matchDomains = [""]
+            config.proxySettings = proxy
         }
     }
 }

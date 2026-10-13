@@ -17,8 +17,11 @@
 // Configuration settings file format documentation can be found at:
 // https://help.apple.com/xcode/#/dev745c5c974
 
-MARKETING_VERSION = 1.1.0
-CURRENT_PROJECT_VERSION = 5
+MARKETING_VERSION = 1.2.0
+CURRENT_PROJECT_VERSION = 6
+
+// The bundled simulator OpenSSL build targets Apple Silicon.
+ARCHS[sdk=iphonesimulator*] = arm64
 
 PRODUCT_BUNDLE_PREFIX = ch.visin.iodine
 OPENSSL_IOS_ROOT = $(SRCROOT)/build-ios/deps/$(PLATFORM_NAME)

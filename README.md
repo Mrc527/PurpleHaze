@@ -56,27 +56,52 @@ Validate shared Keychain access and VPN routing on the signed device build.
 
 ## Connect
 
-Enter the delegated top domain. Advanced Settings contains the resolver address,
-DNS type and raw UDP toggle. For encrypted mode, paste the Base64 representation
-of the server's existing **32-byte binary key** into **Shared key**. Convert the
-file locally with `openssl base64 -A -in /path/to/iodine.key` and transfer it over
-a trusted channel. Do not generate a different key for this client.
+Create a named profile in the app, enter the delegated tunnel domain and choose
+**Encrypted** or **Legacy** authentication. Each profile owns its server, transport,
+DNS, routing and credential settings. Select a saved profile before connecting;
+editing, deleting and switching profiles is disabled while the VPN is active.
 
-With a key, the client requests `0x602`, with TLS authentication, encrypted packets
-and automatic traffic-key rotation. An invalid key or failed handshake never
-falls back to plaintext. The legacy password field is ignored in encrypted mode.
+For encrypted mode, paste the Base64 representation of the server's existing
+**32-byte binary key** into **Shared key**. Convert the file locally with
+`openssl base64 -A -in /path/to/iodine.key` and transfer it over a trusted channel.
+Do not generate a different key for this client. The client requests `0x602`, with
+TLS authentication, encrypted packets and automatic traffic-key rotation. An
+invalid or missing key never falls back to plaintext.
 
-Leave Shared key empty to use **unencrypted `0x502`**, and enter the server's
+Choose **Legacy** explicitly to use **unencrypted `0x502`**, and enter the server's
 legacy password (at most 32 UTF-8 bytes). The server must allow legacy sessions.
-This matches the command-line client's behavior without `-K`.
+This matches the command-line client's behavior without `-K`. A profile cannot
+contain both a shared key and a legacy password.
 
-Secrets are stored in a shared Keychain group, accessible after first unlock on
-that device, and are excluded from UserDefaults, VPN options, logs and bundles.
-The persisted mode flag prevents a missing encrypted credential from silently
-selecting plaintext. Packets cross the Swift/C boundary as datagrams. The tunnel
-carries IPv4 only; IPv6 is captured and discarded. Sleep does not deliberately
-tear down the tunnel; normal transport inactivity and network changes can still
-interrupt it. See [protocol security](doc/security.md) for protocol properties and limits.
+New profiles use encryption, all IPv4 traffic, custom DNS `1.1.1.1`, DNS transport
+(raw UDP disabled), lazy mode, a one-second timeout and IPv4 resolver transport.
+Server proxy starts disabled. Advanced transport, DNS and route controls live
+inside each profile editor, rather than the system Settings app. DNS may use the
+system resolver, the tunnel server, or a custom IPv4 address. Subnet-only routing
+also includes an explicit route for a configured tunnel/custom DNS address.
+
+An existing single configuration is migrated once into the **Default** profile,
+preserving its transport, DNS and routing behavior. Old HTTP/PAC settings are
+retained for compatibility. Profile metadata and selection are stored together
+in an atomic JSON file in Application Support. Each credential revision is a
+separate Keychain item in the app/extension shared access group, available after
+first device unlock. The app writes credentials before committing metadata;
+failed credential writes leave the previous configuration intact. Plaintext
+legacy passwords in preferences are removed only after migration succeeds.
+Secrets never enter profile metadata, VPN options, logs or the app bundle.
+
+The VPN manager stores the selected profile ID, credential revision and public
+settings, so system-initiated reconnects use that same profile. Missing credentials,
+a stale revision or a mode mismatch stop the connection without falling back to
+another profile. Deleting a profile removes its credential item. Saving a profile
+retires its previous revision; the app updates the disconnected VPN configuration
+before it can reconnect.
+
+Packets cross the Swift/C boundary as datagrams. The tunnel carries IPv4 only;
+IPv6 is captured and discarded. The IPv6 resolver option controls only the outer
+DNS transport. Sleep does not deliberately tear down the tunnel; normal transport
+inactivity and network changes can still interrupt it. See
+[protocol security](doc/security.md) for protocol properties and limits.
 
 The native protocol tests cover encrypted and legacy DNS/raw UDP communication,
 rotation, wrong credentials and downgrade rejection. An unsigned app build is
@@ -84,14 +109,16 @@ compile/link validation only, not an end-to-end iPhone VPN test.
 
 ## Server proxy mode
 
-Enable **Proxy TCP / UDP / DNS** on the main screen before connecting. This requires
+Enable **Server proxy** inside the selected profile before connecting. This requires
 a shared key, protocol `0x602`, and an iodined server started with
 `-X /absolute/path/to/manager.py` (see [companion server setup](doc/proxy-server.md)).
 TCP and UDP, including DNS, are captured as IPv4 packets and encrypted by iodine.
 The server converts these packets through an isolated SOCKS5 gateway; it also
 provides authenticated HTTP/CONNECT and SOCKS5 endpoints for that session.
-No iOS proxy credentials or extra libraries need to be configured. Manual PAC and
-HTTP proxy preferences are ignored in this mode. Changes apply at reconnection.
+No iOS proxy credentials or extra libraries need to be configured. Proxy mode
+forces the full IPv4 route and DNS `1.1.1.1`, unless the profile explicitly selects
+a custom DNS server. Migrated manual PAC and HTTP proxy options are ignored in
+this mode. Changes apply at reconnection.
 
 If negotiation fails, the VPN does not start. A server gateway failure drops
 traffic instead of reverting to ordinary server routing. IPv6 remains blocked;
@@ -104,12 +131,64 @@ network access. A signed device test is required to validate actual iOS routing.
 
 This fork adds encrypted 0x602 sessions with automatic traffic-key rotation,
 explicit legacy mode, shared Keychain credentials, full IPv4 server proxy mode
-for TCP/UDP/DNS, and the UIKit scene lifecycle required by the current SDK.
+for TCP/UDP/DNS, the UIKit scene lifecycle required by the current SDK, and multiple named profiles
+with revision-scoped credentials and per-profile advanced settings.
 The bundled client engine includes its upstream license and provenance.
 
-Validation performed: device Release and signed Debug builds, successful app
+Earlier engine validation included device Release and signed Debug builds, app
 installation and launch on an iPhone, 20 native protocol/proxy tests (also with
 ASan/UBSan), and live Internet TCP/DNS/UDP checks through the matching server.
-The live tunnel checks used the native client; they do not establish a complete
-iPhone traffic-routing test. Signing identities, profiles, server keys, user
-settings and build products are not part of the repository.
+Those live tunnel checks used the native client and do not establish a complete
+iPhone traffic-routing test. The current profile refactor has separate device
+and simulator build checks, plus the regression checks below; it has not been
+installed or tested on a physical iPhone in this iteration. Signing identities,
+profiles, server keys, user settings and build products are not part of the repository.
+
+### Profile regression tests
+
+Run the executable Swift checks on macOS with full Xcode installed:
+
+```sh
+./Tests/run-profile-tests.sh
+```
+
+These use an isolated preferences suite, temporary metadata files and a fake
+credential vault. They cover profile selection/deletion, credential isolation,
+secret-free metadata/options, mode and revision mismatch rejection, legacy and
+encrypted migration, migration retry after vault failure, failed credential and
+metadata writes, corrupt metadata preservation, validation
+and canonical Android/iOS defaults. They do not replace signed-device checks of
+shared Keychain entitlements or Network Extension routing.
+
+### iOS interface smoke test
+
+Validated on 2026-10-13: the complete profile UI scenario passed on the iPhone
+18 Pro simulator (iOS 27) with real Keychain storage and four screenshot attachments.
+
+Use an empty, dedicated Apple Silicon simulator with a recent iOS runtime. The
+UI test creates two synthetic profiles, verifies encrypted-key validation and
+independent legacy/encrypted settings, relaunches the app, and exercises editing,
+Cancel, selection and deletion. Successful runs remove their synthetic profiles.
+They never connect to a server or use a real server key. Screenshots are attached
+to the Xcode result bundle.
+
+```sh
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+./build-openssl.sh iphonesimulator
+xcrun simctl list devices available
+# Replace SIMULATOR_UDID with the dedicated simulator's identifier.
+xcodebuild test -project PurpleHaze.xcodeproj -scheme 'Purple Haze' \
+  -destination 'id=SIMULATOR_UDID' \
+  -derivedDataPath build-ios/UI-DerivedData \
+  -resultBundlePath build-ios/UI-Results.xcresult \
+  CODE_SIGN_IDENTITY=- CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=NO
+xcrun xcresulttool export attachments --path build-ios/UI-Results.xcresult \
+  --output-path build-ios/UI-Screenshots
+```
+
+Ad-hoc simulator signing is required to exercise the real Keychain access group;
+an unsigned simulator app fails with Keychain error `-34018`. The test dismisses
+only the simulator's known Network Extension `IPC failed` startup alert and the
+first-use keyboard introduction. This does not bypass credentials or simulate a
+VPN connection. Device signing, VPN consent, system Settings reconnection and
+real iPhone traffic routing still need a physical-device check.

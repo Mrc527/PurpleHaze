@@ -25,8 +25,16 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 }
 
 
-// UIKit creates the window and root controller from the scene's Main storyboard.
-// Keep scene ownership here; AppDelegate only handles process-level startup.
 final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     var window: UIWindow?
+    func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options connectionOptions: UIScene.ConnectionOptions) {
+        guard let scene = scene as? UIWindowScene else { return }
+        let window = UIWindow(windowScene: scene)
+        let navigation = UINavigationController(rootViewController: ViewController())
+        let appearance = UINavigationBarAppearance(); appearance.configureWithOpaqueBackground()
+        appearance.backgroundColor = Brand.canvas; appearance.titleTextAttributes = [.foregroundColor: Brand.purple]
+        navigation.navigationBar.standardAppearance = appearance; navigation.navigationBar.scrollEdgeAppearance = appearance
+        navigation.navigationBar.tintColor = Brand.purple; window.tintColor = Brand.purple
+        window.rootViewController = navigation; self.window = window; window.makeKeyAndVisible()
+    }
 }

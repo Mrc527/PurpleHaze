@@ -35,6 +35,9 @@ final public class Iodine: NSObject {
     private var iodineToNetworkExtensionSocket: Int32 = -1
     private var networkExtensionToIodineSocket: Int32 = -1
     private var dnsSocket: Int32 = -1
+    private var profileID: String?
+    private var credentialRevision: String?
+    private var invalidProfileReference = false
     private var topDomainPtr: UnsafeMutablePointer<CChar>?
     
     private var packetSource: DispatchSourceRead?
@@ -123,6 +126,11 @@ final public class Iodine: NSObject {
         }
         if let topDomain = options[IodineSettings.topDomain] as? String, topDomain.count > 0 {
             self.topDomain = topDomain
+        }
+        if options[IodineSettings.profileID] != nil || options[IodineSettings.credentialRevision] != nil {
+            profileID = options[IodineSettings.profileID] as? String
+            credentialRevision = options[IodineSettings.credentialRevision] as? String
+            invalidProfileReference = profileID == nil || credentialRevision == nil || options[IodineSettings.encrypted] as? Bool == nil
         }
         encrypted = options[IodineSettings.encrypted] as? Bool ?? false
         serverProxy = options[IodineSettings.serverProxy] as? Bool ?? false
@@ -242,25 +250,34 @@ final public class Iodine: NSObject {
         client_set_lazymode(lazyMode ? 1 : 0)
         client_set_hostname_maxlen(Int32(hostnameMaxLength))
         
-        guard !serverProxy || encrypted else { throw IodineError.invalidCredentials }
-        client_set_proxy(serverProxy ? 1 : 0)
-        if encrypted {
-            guard var key = try Credentials.read(Credentials.sharedKey), key.count == 32 else {
+        guard !invalidProfileReference, !serverProxy || encrypted else { throw IodineError.invalidCredentials }
+        let credentialData: Data
+        if let profileID = profileID, let revision = credentialRevision {
+            let bundle = try ProfileCredentials.read(profileID: profileID, revision: revision, encrypted: encrypted)
+            credentialData = encrypted ? bundle.sharedKey! : Data(bundle.password!.utf8)
+        } else {
+            // Compatibility only for an old VPN configuration with no profile reference.
+            // A malformed or missing scoped item must never fall back to these globals.
+            guard let data = try Credentials.read(encrypted ? Credentials.sharedKey : Credentials.password) else {
                 throw IodineError.invalidCredentials
             }
-            defer { key.resetBytes(in: 0..<key.count) }
-            let ok = key.withUnsafeBytes { bytes in
+            credentialData = data
+        }
+        var data = credentialData
+        defer { data.resetBytes(in: 0..<data.count) }
+        if encrypted {
+            guard data.count == 32 else { throw IodineError.invalidCredentials }
+            let ok = data.withUnsafeBytes { bytes in
                 client_set_key(bytes.bindMemory(to: UInt8.self).baseAddress, bytes.count)
             }
             guard ok == 1 else { throw IodineError.invalidCredentials }
         } else {
-            guard var data = try Credentials.read(Credentials.password), data.count <= 32,
-                  let password = String(data: data, encoding: .utf8) else {
+            guard data.count <= 32, !data.contains(0), let password = String(data: data, encoding: .utf8) else {
                 throw IodineError.invalidCredentials
             }
-            defer { data.resetBytes(in: 0..<data.count) }
             password.withCString { client_set_password($0) }
         }
+        client_set_proxy(serverProxy ? 1 : 0)
 
         runQueue = DispatchQueue(label: "Iodine")
         isSetupComplete = true

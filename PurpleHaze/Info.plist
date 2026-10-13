@@ -44,7 +44,7 @@
 	<key>UIUserInterfaceStyle</key>
 	<string>Light</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Purple Haze needs access to local network to establish VPN tunnel through DNS.</string>
+	<string>PurpleHaze needs access to the local network to establish a VPN tunnel through DNS.</string>
 	<key>CredentialAccessGroup</key>
 	<string>$(AppIdentifierPrefix)$(PRODUCT_BUNDLE_PREFIX).Purple-Haze.credentials</string>
 	<key>UIApplicationSceneManifest</key>
@@ -62,11 +62,11 @@
 					<string>UIWindowScene</string>
 					<key>UISceneDelegateClassName</key>
 					<string>$(PRODUCT_MODULE_NAME).SceneDelegate</string>
-					<key>UISceneStoryboardFile</key>
-					<string>Main</string>
 				</dict>
 			</array>
 		</dict>
 	</dict>
+	<key>CFBundleDisplayName</key>
+	<string>PurpleHaze</string>
 </dict>
 </plist>

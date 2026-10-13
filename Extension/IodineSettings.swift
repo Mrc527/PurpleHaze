@@ -15,6 +15,10 @@
 //
 
 public final class IodineSettings {
+    public static let profileID = "ProfileID"
+    public static let credentialRevision = "CredentialRevision"
+    public static let dnsMode = "DNSMode"
+    public static let defaultRoute = "DefaultRoute"
     public static let lastSavedSettings = "LastSavedSettings"
     public static let ipv6Support = "IPv6Support"
     public static let nameserverHost = "NameserverHost"
