@@ -17,9 +17,27 @@ const help=`Usage: node tools/ci_monitor.cjs COMMAND [arguments]
   check-actions [workflow file or directory]
   release [gh release arguments]
   --help
-Set GH_REPO=owner/repository or use gh arguments --repo where supported.
+Defaults to git remote origin (including forks), never the upstream repository.
+Set GH_REPO=owner/repository or use gh arguments --repo where supported to override.
 Every command logs its executable and argument vector before execution.`;
-function gh(args,capture=false){console.error('[ci_monitor]',JSON.stringify(['gh',...args]));const r=spawnSync('gh',args,{encoding:'utf8',stdio:capture?['inherit','pipe','inherit']:'inherit',env:process.env});if(r.error)throw r.error;if(r.status!==0)throw new Error(`gh exited ${r.status}`);return capture?r.stdout.trim():'';}
+function repositoryEnvironment(args){
+ const env={...process.env};
+ const explicit=args.some(a=>a==='--repo'||a.startsWith('--repo=')||a==='-R'||/^-[R][^ ]+/.test(a));
+ if(env.GH_REPO||explicit)return env;
+ const remote=spawnSync('git',['remote','get-url','origin'],{encoding:'utf8',stdio:['ignore','pipe','ignore']});
+ if(remote.status===0){
+  let host,pathname;const origin=remote.stdout.trim();
+  try{
+   if(origin.includes('://')){const url=new URL(origin);host=url.hostname;pathname=url.pathname;}
+   else{const match=origin.match(/^(?:[^@/]+@)?([^:/]+):(.+)$/);if(match){host=match[1];pathname=match[2];}}
+   const parts=(pathname||'').replace(/^\/+|\/+$/g,'').replace(/\.git$/,'').split('/');
+   if(host&&parts.length===2&&parts.every(p=>/^[A-Za-z0-9_.-]+$/.test(p)))env.GH_REPO=(host==='github.com'?'':host+'/')+parts.join('/');
+  }catch(_){/* A non-GitHub origin must be overridden explicitly. */}
+ }
+ if(!env.GH_REPO&&['run','workflow','release'].includes(args[0]))throw Error('Cannot resolve GitHub repository from origin; set GH_REPO or --repo explicitly');
+ return env;
+}
+function gh(args,capture=false){console.error('[ci_monitor]',JSON.stringify(['gh',...args]));const r=spawnSync('gh',args,{encoding:'utf8',stdio:capture?['inherit','pipe','inherit']:'inherit',env:repositoryEnvironment(args)});if(r.error)throw r.error;if(r.status!==0)throw new Error(`gh exited ${r.status}`);return capture?r.stdout.trim():'';}
 function ref(repo,tag){const r=JSON.parse(gh(['api',`repos/${repo}/git/ref/tags/${tag}`],true));return r.object.type==='tag'?JSON.parse(gh(['api',`repos/${repo}/git/tags/${r.object.sha}`],true)).object.sha:r.object.sha;}
 try{
  if(!command||command==='--help'){console.log(help);process.exit(0);}

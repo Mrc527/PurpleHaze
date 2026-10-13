@@ -2,6 +2,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 release_build=${1:-false}
+node tools/ci-monitor-tests.cjs
+node tools/ci-release-tests.cjs
 python3 scripts/verify-vendor.py
 python3 - <<'PY'
 import hashlib
